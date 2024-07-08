@@ -1,0 +1,9 @@
+TOKEN=
+PROMPT="masterpiece, best quality, very aesthetic, absurdres"
+NEGATIVE_PROMPT="nsfw, lowres, (bad), text, error, fewer, extra, missing, worst quality, jpeg artifacts, low quality, watermark, unfinished, displeasing, oldest, early, chromatic aberration, signature, extra digits, artistic error, username, scan, [abstract]"
+RESOLUTION="896 x 1152"
+STEPS=28
+SAMPLER="Euler a"
+STLYE_SELECTOR="(None)"
+QUALITY_SELECTOR="Standard v3.1"
+SAMPLERS = ['DPM++ 2M Karras', 'DPM++ SDE Karras', 'DPM++ 2M SDE Karras', 'Euler', 'Euler a', 'DDIM']
