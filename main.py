@@ -76,7 +76,7 @@ class DFAWordBlacklist:
         start_index = 0
         i = -1
         while (i := (i + 1)) < len(value):
-            char = value[i]
+            char = value[i].lower()
             if char in current_dir:
                 if isinstance(current_dir[char], dict):
                     current_dir = current_dir[char]
@@ -118,6 +118,21 @@ class Animegen(commands.Bot, ABC):
         self.img_client = Client("Boboiazumi/animagine-xl-3.1")
         self.chat_client = Client("Be-Bo/llama-3-chatbot_70b")
         self.config = toml.load(config_path)
+
+        self.blacklist = DFAWordBlacklist()
+        if 'words' in self.config['blacklist']:
+            self.blacklist.add_all(self.config['blacklist']['words'])
+        if 'files' in self.config['blacklist']:
+            for file in self.config['blacklist']['files']:
+                try:
+                    with open(file, 'rt', encoding='utf8') as f:
+                        self.blacklist.add_all(
+                            filter(lambda x: bool(x.strip()),
+                                   map(lambda x: x.removesuffix('\n'),
+                                       f.readlines())))
+                except IOError:
+                    pass  # Ignore failing files
+        self.blacklist.compile()
 
         self.general = self.config["general"]
         self.params = self.config['command_params']
@@ -200,7 +215,9 @@ class Animegen(commands.Bot, ABC):
             # Defer the response
             async with message.channel.typing():
                 # Generate the response
-                response = await self.chat(f"{message.author.display_name}: {message.content}")
+                response = self.blacklist.replace(
+                    await self.chat(f"{message.author.display_name}: {message.content}"),
+                    '*')
 
             if match := re.search(r"\[image: ([^\]]*)\]", response, re.IGNORECASE):
                 await self.send_with_image(
@@ -227,20 +244,6 @@ class Bot:
             except Exception as e:
                 print(e)
 
-        blacklist = DFAWordBlacklist()
-        if 'words' in instance.config['blacklist']:
-            blacklist.add_all(instance.config['blacklist']['words'])
-        if 'files' in instance.config['blacklist']:
-            for file in instance.config['blacklist']['files']:
-                try:
-                    with open(file, 'rt', encoding='utf8') as f:
-                        blacklist.add_all(
-                            filter(lambda x: bool(x.strip()),
-                                   map(lambda x: x.removesuffix('\n'),
-                                       f.readlines())))
-                except IOError:
-                    pass  # Ignore failing files
-        blacklist.compile()
         verbose = instance.general['verbose']
 
         PROMPT = instance.params["additional_prompt"].replace(", ", "`, `") + "`."
@@ -264,11 +267,6 @@ class Bot:
                     "`" + instance.defaults["negative_prompt"].replace(",", "`, `") + "`, `")
 
             return (prompt + PROMPT, negative_prompt + NEGATIVE_PROMPT)
-
-        def cleanse(prompt):
-            t = prompt.lower()
-            t = blacklist.replace(t, '*')
-            return t
 
         def embed(user, prompt: str, negative_prompt: str, kwargs):
 
@@ -325,7 +323,7 @@ class Bot:
                 style_selector: str = instance.defaults['style_selector'],
                 seed: int = -1):
 
-            prompt = cleanse(prompt)
+            prompt = instance.blacklist.replace(prompt, '')
 
             if not (sampler in instance.params['samplers']):
                 sampler = instance.defaults['sampler']
