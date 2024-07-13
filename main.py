@@ -1,4 +1,5 @@
 from abc import ABC
+from typing import Iterable
 
 import discord
 from discord import app_commands
@@ -13,6 +14,102 @@ import random
 import os
 import toml
 import re
+
+
+class DFAWordBlacklist:
+    DEFAULT = 'default'
+
+    def __init__(self) -> None:
+        self._directory = {}
+
+    def _get_or_create_path(self, path: str, value):
+        current_dir = self._directory
+        path_to_go = path
+        while len(path_to_go) > 1:
+            if path_to_go[0] not in current_dir:
+                current_dir[path_to_go[0]] = {}
+            elif not isinstance(current_dir[path_to_go[0]], dict):
+                return current_dir[path_to_go[0]]
+            current_dir = current_dir[path_to_go[0]]
+            path_to_go = path_to_go[1:]
+        current_dir[path_to_go] = value
+        return current_dir
+
+    def _get_path(self, path: str):
+        current_dir = self._directory
+        while path:
+            if path[0] not in current_dir:
+                return None
+            current_dir = current_dir[path[0]]
+            if not isinstance(current_dir, dict):
+                return current_dir
+            path = path[1:]
+        return current_dir
+
+    def add_word(self, word: str):
+        self._get_or_create_path(word, True)
+
+    def add_all(self, items: Iterable[str]):
+        for item in items:
+            self.add_word(item)
+
+    def compile(self):
+        todo: list[tuple[str, dict[str, dict | bool]]] = [
+            ('', self._directory)]
+        while todo:
+            dir_name, val = todo.pop()
+            for k, v in val.items():
+                if isinstance(v, dict):
+                    todo.append((dir_name + k, v))
+            offset = 0
+            if not dir_name:
+                continue
+            while dir_name := dir_name[1:]:
+                offset += 1
+                path = self._get_path(dir_name)
+                if isinstance(path, dict):
+                    val[DFAWordBlacklist.DEFAULT] = (path, offset)
+
+    def exec(self, value: str) -> list[tuple[int, int]]:
+        result = []
+        current_dir = self._directory
+        start_index = 0
+        i = -1
+        while (i := (i + 1)) < len(value):
+            char = value[i]
+            if char in current_dir:
+                if isinstance(current_dir[char], dict):
+                    current_dir = current_dir[char]
+                else:
+                    result.append((start_index, i + 1))
+                    start_index = i + 1
+                    current_dir = self._directory
+            elif DFAWordBlacklist.DEFAULT in current_dir:
+                current_dir, offset = current_dir[DFAWordBlacklist.DEFAULT]
+                start_index += offset
+                i -= 1
+            elif current_dir is self._directory:
+                start_index = i + 1
+            else:
+                current_dir = self._directory
+                start_index = i
+                i -= 1
+        return result
+
+    def replace(self, value: str, replace: str):
+        result = ''
+        matches = self.exec(value)
+        i = 0
+        while matches:
+            start, end = matches.pop(0)
+            result += value[i:start]
+            result += replace if len(replace) != 1 else (replace *
+                                                         (end - start))
+            i = end
+        result += value[i:]
+        return result
+
+
 
 class Animegen(commands.Bot, ABC):
     def __init__(self, config_path="config.toml",
@@ -130,19 +227,20 @@ class Bot:
             except Exception as e:
                 print(e)
 
-        blacklist = set()
+        blacklist = DFAWordBlacklist()
         if 'words' in instance.config['blacklist']:
-            blacklist |= set(instance.config['blacklist']['words'])
+            blacklist.add_all(instance.config['blacklist']['words'])
         if 'files' in instance.config['blacklist']:
             for file in instance.config['blacklist']['files']:
                 try:
                     with open(file, 'rt', encoding='utf8') as f:
-                        blacklist |= set(
+                        blacklist.add_all(
                             filter(lambda x: bool(x.strip()),
                                    map(lambda x: x.removesuffix('\n'),
                                        f.readlines())))
                 except IOError:
                     pass  # Ignore failing files
+        blacklist.compile()
         verbose = instance.general['verbose']
 
         PROMPT = instance.params["additional_prompt"].replace(", ", "`, `") + "`."
@@ -169,9 +267,7 @@ class Bot:
 
         def cleanse(prompt):
             t = prompt.lower()
-            for word in blacklist:
-                if word in t:
-                    t = t.replace(word, "")
+            t = blacklist.replace(t, '*')
             return t
 
         def embed(user, prompt: str, negative_prompt: str, kwargs):
