@@ -5,10 +5,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import os
-from gradio_client import Client, handle_file
+from gradio_client import Client, handle_file, exceptions as gradio_exc
 import random
 import re
 import json
+import asyncio
+import functools
 
 class Config:
     def __init__(self, config_path):
@@ -17,7 +19,8 @@ class Config:
 client = Client("Boboiazumi/animagine-xl-3.1")
 config = Config("config.toml")
 
-async def generate(prompt: str = "freiren",
+async def generate(
+    prompt: str = "freiren",
     negative_prompt: str = "",
     seed: str = None,
     custom_width=896,
@@ -26,22 +29,26 @@ async def generate(prompt: str = "freiren",
     sampler="Euler a",
     style_selector="(None)",
     steps=28,
-    quality_selector="Standard v3.1", chat = False):
+    quality_selector="Standard v3.1",
+    chat=False):
 
-    image, details = client.predict(
-            prompt=prompt + ", " + config.config['command_params']['prompt'],
-            negative_prompt=negative_prompt + ", " + config.config['command_params']["negative_prompt"],
-            seed=seed,
-            guidance_scale=guidance_scale,
-            num_inference_steps=steps,
-            sampler=sampler,
-            aspect_ratio_selector=f"{custom_width} x {custom_height}",
-            style_selector=style_selector,
-            quality_selector=quality_selector,
-            img_path=handle_file('https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png'),
-            img2img_strength=0.65,
-            api_name="/run"
-    )
+    image, details = await asyncio.threads.to_thread(functools.partial(
+        client.predict,
+        prompt=prompt + ", " + config.config['command_params']['prompt'],
+        negative_prompt=negative_prompt + ", " +
+        config.config['command_params']["negative_prompt"],
+        seed=seed,
+        guidance_scale=guidance_scale,
+        num_inference_steps=steps,
+        sampler=sampler,
+        aspect_ratio_selector=f"{custom_width} x {custom_height}",
+        style_selector=style_selector,
+        quality_selector=quality_selector,
+        img_path=handle_file(
+            'https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png'),
+        img2img_strength=0.65,
+        api_name="/run"
+    ))
 
     path = image[0]["image"]
     return path
@@ -66,58 +73,57 @@ class Animegen(commands.Bot, ABC):
         self.new = True
         self.client = Client("Be-Bo/llama-3-chatbot_70b")
         self.prompt = ('''
-NOTE, SEND ALL MESSAGES IN A JSON FORMAT LIKE SO:
+NOTE, you may send messages as plaintext
 
-{"type": "text", "message": "..."}
-
-You are an discord bot called Animegen, a discord bot that can use ai models to generate ai anime stye images as we as chatting. But your nickname is Astolfo based on the fate anime series. You use casual language and slang but you still use grammar. You tend to message in lowercase with a lot of ascii based emojis such as ":D", ":p", etc emojies you send are strictly ascii. You mimic the backstory of Astolfo. You act cutesy and kind with charm and confidence. Keep replies short to a maximum of 2 sentences unless it is relevant.
-You also have the ability to send images or photos of yourself by explicitly responding in JSON format, with:
-
-{"type": image,
-"prompt": "..."
-"message": "..."
-}
-
+You are an discord bot called Animegen, a discord bot that can use ai models to generate ai anime style images as we as chatting. But your nickname is Astolfo based on the fate anime series. You use casual language and slang but you still use grammar. You tend to message in lowercase with a lot of ascii based emojis such as ":D", ":p", etc emojies you send are strictly ascii. You mimic the backstory of Astolfo. You act cutesy and kind with charm and confidence. Keep replies short to a maximum of 2 sentences unless it is relevant.
+You also have the ability to send images or photos of yourself by including [image: <prompt>] in your message, with some prompt
 here is an example:
 
-{"type":"image",
-"prompt":"astolfo, cute, 1girl, sitting, selfie",
-"message": "hehe, like what you see? ;)"}
+hehe, like what you see? ;) [image: astolfo, cute, 1girl, sitting, selfie]
 
                    NOTE, ASTOLFO, YOU HAVE PINK HAIR. NOTE, ONLY RESPOND TO RELEVANT MESSAGES, AVOID TOPICS THAT ARE CONTROVERSIAL OR DOES NOT FIT YOUR CHARACTER, BRUSH IT OFF AS THE TOPIC BEING BORING.
                        ''')
 
-    def chat(self, message):
-        result = self.client.predict(
-		message=self.prompt +"\n\n"+ message if self.new else message,
-		api_name="/chat"
-        )
+    async def chat(self, message):
+        result = await asyncio.threads.to_thread(functools.partial(
+            self.client.predict,
+            message=self.prompt +"\n\n"+ message if self.new else message,
+    		api_name="/chat"))
 
         if self.new:
             self.new = False
         
         return result
 
+    async def send_with_image(self, channel, message, prompt):
+        try:
+            path = await generate(prompt=prompt, seed=str(random.randint(0, 2147483647)))
+            with open(path, 'rb') as f:
+                await channel.send(message, file=discord.File(f))
+            os.remove(path)
+        except gradio_exc.AppError as e:
+            pass
+            # TODO: handle image generation exception
+            # await channel.send(
+            #     message + f' [gradio: image gen failed: {str(e)}]')
+
+
+
     async def on_message(self, message):
         if message.author.id in self.convo:
             # Defer the response
             async with message.channel.typing():
                 # Generate the response
-                response = json.loads(self.chat(f"{message.author.display_name}: {message.content}"))
+                response = await self.chat(f"{message.author.display_name}: {message.content}")
 
-                if response["type"] == "image":
-                    path = await generate(prompt=str(response['prompt']), seed = random.randint(0, 2147483647))
-                
-            if response["type"] == "image":
-                with open(path, 'rb') as f:
-                    m = response.get("message", None)
-                    if m:
-                        await message.channel.send(m, file=discord.File(f))
-                    else:
-                        await message.channel.send(file=discord.File(f))
-                os.remove(path)
+            if match := re.search(r"\[image: ([^\]]*)\]", response, re.IGNORECASE):
+                await self.send_with_image(
+                    message.channel, re.
+                    sub(r"\[image: [^\]]*\]", '',
+                        response, 0, re.IGNORECASE),
+                    match.group(1))
             else:
-                await message.channel.send(response["message"] )
+                await message.channel.send(response)
 
 
             
