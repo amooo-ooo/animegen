@@ -130,7 +130,19 @@ class Bot:
             except Exception as e:
                 print(e)
 
-        blacklist = instance.config['blacklist']['words']
+        blacklist = set()
+        if 'words' in instance.config['blacklist']:
+            blacklist |= set(instance.config['blacklist']['words'])
+        if 'files' in instance.config['blacklist']:
+            for file in instance.config['blacklist']['files']:
+                try:
+                    with open(file, 'rt', encoding='utf8') as f:
+                        blacklist |= set(
+                            filter(lambda x: bool(x.strip()),
+                                   map(lambda x: x.removesuffix('\n'),
+                                       f.readlines())))
+                except IOError:
+                    pass  # Ignore failing files
         verbose = instance.general['verbose']
 
         PROMPT = instance.params["additional_prompt"].replace(", ", "`, `") + "`."
