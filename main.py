@@ -1,103 +1,94 @@
 from abc import ABC
 
-import toml
 import discord
 from discord import app_commands
 from discord.ext import commands
-import os
 from gradio_client import Client, handle_file, exceptions as gradio_exc
-import random
-import re
-import json
+
+from dotenv import load_dotenv
+from pathlib import Path
 import asyncio
 import functools
-
-class Config:
-    def __init__(self, config_path):
-        self.config = toml.load(config_path)
-
-client = Client("Boboiazumi/animagine-xl-3.1")
-config = Config("config.toml")
-
-async def generate(
-    prompt: str = "freiren",
-    negative_prompt: str = "",
-    seed: str = None,
-    custom_width=896,
-    custom_height=1452,
-    guidance_scale=7,
-    sampler="Euler a",
-    style_selector="(None)",
-    steps=28,
-    quality_selector="Standard v3.1",
-    chat=False):
-
-    image, details = await asyncio.threads.to_thread(functools.partial(
-        client.predict,
-        prompt=prompt + ", " + config.config['command_params']['prompt'],
-        negative_prompt=negative_prompt + ", " +
-        config.config['command_params']["negative_prompt"],
-        seed=seed,
-        guidance_scale=guidance_scale,
-        num_inference_steps=steps,
-        sampler=sampler,
-        aspect_ratio_selector=f"{custom_width} x {custom_height}",
-        style_selector=style_selector,
-        quality_selector=quality_selector,
-        img_path=handle_file(
-            'https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png'),
-        img2img_strength=0.65,
-        api_name="/run"
-    ))
-
-    path = image[0]["image"]
-    return path
-
-def extract_json(s):
-    # Use a regular expression to find a string that looks like a JSON object
-    match = re.search(r"\{.*?\}", s)
-
-    if match:
-        json_str = match.group()
-        data = json.loads(json_str.replace("'", "\""))
-        remaining_str = s.split('{')[0]
-        print(remaining_str)
-
-        return remaining_str, data
-    return s, None
+import random
+import os
+import toml
+import re
 
 class Animegen(commands.Bot, ABC):
-    def __init__(self, *args, **options):
+    def __init__(self, config_path="config.toml",
+                 *args, **options):
         super().__init__(*args, **options)
-        self.convo = []
-        self.new = True
-        self.client = Client("Be-Bo/llama-3-chatbot_70b")
-        self.prompt = ('''
-NOTE, you may send messages as plaintext
+        self.img_client = Client("Boboiazumi/animagine-xl-3.1")
+        self.chat_client = Client("Be-Bo/llama-3-chatbot_70b")
+        self.config = toml.load(config_path)
 
-You are an discord bot called Animegen, a discord bot that can use ai models to generate ai anime style images as we as chatting. But your nickname is Astolfo based on the fate anime series. You use casual language and slang but you still use grammar. You tend to message in lowercase with a lot of ascii based emojis such as ":D", ":p", etc emojies you send are strictly ascii. You mimic the backstory of Astolfo. You act cutesy and kind with charm and confidence. Keep replies short to a maximum of 2 sentences unless it is relevant.
-You also have the ability to send images or photos of yourself by including [image: <prompt>] in your message, with some prompt
-here is an example:
+        self.general = self.config["general"]
+        self.params = self.config['command_params']
+        self.defaults = self.config['defaults']
 
-hehe, like what you see? ;) [image: astolfo, cute, 1girl, sitting, selfie]
+        self.chat_participants = []
+        self.chat_history = []
 
-                   NOTE, ASTOLFO, YOU HAVE PINK HAIR. NOTE, ONLY RESPOND TO RELEVANT MESSAGES, AVOID TOPICS THAT ARE CONTROVERSIAL OR DOES NOT FIT YOUR CHARACTER, BRUSH IT OFF AS THE TOPIC BEING BORING.
-                       ''')
+        path = Path(Path(__file__).parent, "prompts")
+        with open(Path(path, "system.txt"), "r") as f:
+            self.system = f.read().strip() + "\n"
+
+        with open(Path(path, "reminder.txt"), "r") as f:
+            self.reminder = f.read().strip() + "\n"
+
+    async def generate(
+            self,
+            prompt: str | None = "frieren",
+            negative_prompt: str | None = "",
+            kwargs: dict = {}):
+
+        image, details = await asyncio.threads.to_thread(functools.partial(
+            self.img_client.predict,
+            prompt=prompt + ", " + self.params['additional_prompt'],
+            negative_prompt=negative_prompt + ", " + self.params["additional_negative_prompt"],
+            seed=kwargs.get(
+                "seed", random.randint(0, 2147483647)),
+            guidance_scale=7,
+            num_inference_steps=kwargs.get(
+                "steps", self.defaults["steps"]),
+            sampler=kwargs.get(
+                "sampler", self.defaults["sampler"]),
+            aspect_ratio_selector=kwargs.get(
+                "aspect_ratio", self.defaults["aspect_ratio"]),
+            style_selector=kwargs.get(
+                "style_selector", self.defaults["style_selector"]),
+            quality_selector=kwargs.get(
+                "quality_selector", self.defaults["quality_selector"]),
+            img_path=handle_file(
+                'https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png'),
+            img2img_strength=0.65,
+            api_name="/run"
+        ))
+
+        path = image[0]["image"]
+        return path
 
     async def chat(self, message):
-        result = await asyncio.threads.to_thread(functools.partial(
-            self.client.predict,
-            message=self.prompt +"\n\n"+ message if self.new else message,
-    		api_name="/chat"))
+        if not self.chat_history:
+            message = (self.system + message)
+        elif not (len(self.chat_history) % self.general["context_window"]):
+            message = (self.reminder + message)
 
-        if self.new:
-            self.new = False
-        
+        result = await asyncio.threads.to_thread(functools.partial(
+            self.chat_client.predict,
+            message=message,
+            api_name="/chat"))
+
+        if len(self.chat_history) >= self.general["context_window"]:
+            self.chat_history = self.chat_history[1:] + [result]
+        else:
+            self.chat_history.append(result)
+
         return result
 
     async def send_with_image(self, channel, message, prompt):
         try:
-            path = await generate(prompt=prompt, seed=str(random.randint(0, 2147483647)))
+            path = await self.generate(prompt)
             with open(path, 'rb') as f:
                 await channel.send(message, file=discord.File(f))
             os.remove(path)
@@ -107,10 +98,8 @@ hehe, like what you see? ;) [image: astolfo, cute, 1girl, sitting, selfie]
             # await channel.send(
             #     message + f' [gradio: image gen failed: {str(e)}]')
 
-
-
     async def on_message(self, message):
-        if message.author.id in self.convo:
+        if message.author.id in self.chat_participants:
             # Defer the response
             async with message.channel.typing():
                 # Generate the response
@@ -126,13 +115,11 @@ hehe, like what you see? ;) [image: astolfo, cute, 1girl, sitting, selfie]
                 await message.channel.send(response)
 
 
-            
 class Bot:
     def __init__(self, token, **options):
         super().__init__(**options)
-        instance = Animegen(command_prefix="!", 
-                            intents=discord.Intents.all(),
-                            activity=discord.Activity(name='Dr', type=discord.ActivityType.custom))
+        instance = Animegen(command_prefix="!",
+                            intents=discord.Intents.all())
 
         @instance.event
         async def on_ready():
@@ -143,122 +130,105 @@ class Bot:
             except Exception as e:
                 print(e)
 
-        params = config.config['command_params']
-        blacklist = config.config['blacklist']['words']
-        verbose = config.config['general']['verbose']
+        blacklist = instance.config['blacklist']['words']
+        verbose = instance.general['verbose']
 
-        _NEGATIVE_PROMPT = ", ".join([f"`{m}`" for m in params["negative_prompt"].split(", ")])
-        _PROMPT = ", ".join([f"`{m}`" for m in params['prompt'].split(", ")])
+        PROMPT = instance.params["additional_prompt"].replace(", ", "`, `") + "`."
+        NEGATIVE_PROMPT = instance.params["additional_negative_prompt"].replace(", ", "`, `") + "`."
 
         def split(prompt: str,
-                negative_prompt: str):
+                  negative_prompt: str):
 
             if prompt:
-                prompt = ", ".join([f"`{i.strip()}`" for i in prompt.split(",")]) + ", "
+                prompt = ("`" + prompt.replace(", ",
+                          ",").replace(",", "`, `") + "`, `")
             else:
-                prompt = "frieren, "
+                prompt = (
+                    "`" + instance.defaults["prompt"].replace(",", "`, `") + "`, ")
 
             if negative_prompt:
-                negative_prompt = ", ".join([f"`{i.strip()}`" for i in negative_prompt.split(",")]) + ", " + _NEGATIVE_PROMPT + "."
-            else:
-                negative_prompt = _NEGATIVE_PROMPT + "."
+                negative_prompt = (
+                    "`" + negative_prompt.replace(", ", ",").replace(",", "`, `") + "`, `")
+            elif instance.defaults["negative_prompt"]:
+                negative_prompt = (
+                    "`" + instance.defaults["negative_prompt"].replace(",", "`, `") + "`, `")
 
-            return (prompt + _PROMPT + ".", negative_prompt)
-        
+            return (prompt + PROMPT, negative_prompt + NEGATIVE_PROMPT)
+
         def cleanse(prompt):
-            bad = []
             t = prompt.lower()
             for word in blacklist:
                 if word in t:
-                    bad.append(word)
+                    t = t.replace(word, "")
+            return t
 
-            if bad:
-                for word in bad:
-                    t.replace(word, "")
-                return t
-            return prompt
-            
-        def embed(user, 
-                prompt: str, 
-                negative_prompt: str,
-                sampler: str,
-                seed: str,
-                width: int,
-                height: int,
-                steps: int,
-                style_selector: str,
-                quality_selector: str):
+        def embed(user, prompt: str, negative_prompt: str, kwargs):
 
-            if seed is None:
-                seed = random.randint(0, 2147483647)
+            embedVar = discord.Embed(title=f"Generating for `@{user}`!",
+                                     description="Powered by `Boboiazumi/animagine-xl-3.1` on Huggingface Spaces with Gradio.",
+                                     color=0xf4e1cc)
 
-            embedVar = discord.Embed(title=f"Generating for `@{user}`!", 
-                                    description="Powered by `Boboiazumi/animagine-xl-3.1` on Huggingface Spaces with Gradio.", 
-                                    color=0xf4e1cc)
-            
             prompt, negative_prompt = split(prompt, negative_prompt)
 
             embedVar.add_field(name="Prompt", value=prompt, inline=False)
-            embedVar.add_field(name="Negative Prompt", value=negative_prompt, inline=False)
+            embedVar.add_field(name="Negative Prompt",
+                               value=negative_prompt, inline=False)
+        
+            for title, value in kwargs.items():
+                embedVar.add_field(name=title.title(),
+                                   value=value, inline=True)
 
-            embedVar.add_field(name="Sampler", value=sampler, inline=True)
-            embedVar.add_field(name="Seed", value=seed, inline=True)
-            embedVar.add_field(name="Inference Steps", value=steps, inline=True)
-
-            embedVar.add_field(name="Resolution", value=f"{width} x {height} ", inline=True)
-            embedVar.add_field(name="Quality Selector", value=quality_selector, inline=True)
-            embedVar.add_field(name="Style Selector", value=style_selector, inline=True)
-
-            #embedVar.set_footer(text=f"You're currenty position {len(queue)} in the queue!")
             return embedVar
 
         @instance.tree.command(name="chat", description="Join, create or leave a conversation with Animegen")
         async def chat(interaction: discord.Interaction):
-            if not (interaction.user.id in instance.convo):
-                instance.convo.append(interaction.user.id)
+            if not (interaction.user.id in instance.chat_participants):
+                instance.chat_participants.append(interaction.user.id)
                 await interaction.response.send_message(f"`@{interaction.user.display_name}` has joined the conversation!")
             else:
-                instance.convo.remove(interaction.user.id)
+                instance.chat_participants.remove(interaction.user.id)
                 await interaction.response.send_message(f"`@{interaction.user.display_name}` has left the conversation!")
 
-            if instance.convo == []: # refresh
-                instance.client  = Client("Be-Bo/llama-3-chatbot_70b")
-                instance.new = True
-
+            if instance.chat_participants == []:  # refresh
+                instance.client = Client("Be-Bo/llama-3-chatbot_70b")
+                instance.chat_history = []
 
         @instance.tree.command(name="imagine", description="Generate an image")
-        @app_commands.describe(prompt = "Tags for generating the image",
-                       negative_prompt = "Penalty tags for generating the image",
-                       sampler = str(params['samplers']),
-                       seed = "Seed for generating the image",
-                       steps = "Inference steps for generating the image",
-                       width= "Custom width",
-                       height='Custom height',
-                       quality_selector=str(params['quality_selector']),
-                       style_selector=str(params['style_selector']))
-        async def imagine(interaction: discord.Interaction, 
-                    prompt: str = "frieren",
-                    negative_prompt: str = "",
-                    sampler: str = params['samplers'][0],
-                    steps: int = params['steps'],
-                    width: int = params['width'],
-                    height: int = params['height'],
-                    quality_selector: str = params['quality_selector'][0],
-                    style_selector: str =params['style_selector'][0],
-                    seed: int = None):
+        @app_commands.describe(
+            prompt="Tags for generating the image",
+            negative_prompt="Penalty tags for generating the image",
+            sampler=str(instance.params['samplers']),
+            seed="Seed for generating the image",
+            steps="Inference steps for generating the image",
+            width="Custom width",
+            height='Custom height',
+            quality_selector=str(instance.params['quality_selectors']),
+            style_selector=str(instance.params['style_selectors'])
+        )
+        async def imagine(
+                interaction: discord.Interaction,
+                prompt: str = instance.defaults['prompt'],
+                negative_prompt: str = instance.defaults['negative_prompt'],
+                sampler: str = instance.defaults['sampler'],
+                steps: int = instance.defaults['steps'],
+                width: int = int(instance.defaults['aspect_ratio'].split(" x ")[0]),
+                height: int = int(instance.defaults['aspect_ratio'].split(" x ")[1]),
+                quality_selector: str = instance.defaults['quality_selector'],
+                style_selector: str = instance.defaults['style_selector'],
+                seed: int = -1):
 
             prompt = cleanse(prompt)
 
-            if not (sampler in params['samplers']):
-                sampler = params['samplers'][0]
+            if not (sampler in instance.params['samplers']):
+                sampler = instance.defaults['sampler']
 
-            if not (quality_selector in params['quality_selector']):
-                quality_selector = params['quality_selector'][0]
+            if not (quality_selector in instance.params['quality_selectors']):
+                quality_selector = instance.defaults['quality_selector']
 
-            if not (style_selector in params['style_selector']):
-                style_selector = params['style_selector'][0]
-            
-            if seed is None:
+            if not (style_selector in instance.params['style_selectors']):
+                style_selector = instance.defaults['style_selector']
+
+            if 0 > seed or seed > 2147483647:
                 seed = random.randint(0, 2147483647)
 
             if verbose:
@@ -270,36 +240,34 @@ class Bot:
 
             await interaction.response.defer()
 
-            # must be a cleaner way to do this
+            kwargs = {'seed': seed,
+                      'sampler': sampler,
+                      'aspect_ratio': f"{width} x {height}",
+                      'steps': steps,
+                      'style_selector': style_selector,
+                      'quality_selector': quality_selector
+                      }
+
             try:
-                path = await generate(prompt=prompt,
-                                            negative_prompt=negative_prompt,
-                                            sampler=sampler,
-                                            seed=seed,
-                                            custom_width=width,
-                                            custom_height=height, 
-                                            steps=steps, 
-                                            style_selector=style_selector,
-                                            quality_selector=quality_selector)
+                embed_log = embed(interaction.user.display_name,
+                                  prompt,
+                                  negative_prompt,
+                                  kwargs)
                 
+                path = await instance.generate(prompt, negative_prompt,  kwargs)
+
                 with open(path, 'rb') as f:
-                    await interaction.followup.send(embed=embed(interaction.user.display_name,
-                                                                        prompt,
-                                                                        negative_prompt=negative_prompt,
-                                                                        seed=seed,
-                                                                        sampler=sampler, width=width, height=height,
-                                                                        steps=steps, 
-                                                                        style_selector=style_selector, 
-                                                                        quality_selector=quality_selector),
-                                                                        file=discord.File(f))
-                    
+                    await interaction.followup.send(embed=embed_log, file=discord.File(f))
+
                 os.remove(path)
             except Exception as e:
-                await interaction.followup.send(f"> Quota was met for generating images. Go touch some grass for {':'.join(str(e).split(':')[2:])[:5]} minute(s) and come back!")
+                time = ':'.join(str(e).split(':')[2:])[:5]
+                await interaction.followup.send(f"> Quota was met for generating images. Go touch some grass for {time} minute(s) and come back!")
                 print(e)
 
         instance.run(token)
 
+
 if __name__ == "__main__":
-    bot = Bot(
-    )
+    load_dotenv()
+    bot = Bot(token=os.getenv('TOKEN'))

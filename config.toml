@@ -1,14 +1,21 @@
 [general]
-verbose = true
+context_window = 10
+verbose = false
+
+[defaults]
+prompt = "frieren"
+negative_prompt = ""
+aspect_ratio = "892 x 1452"
+style_selector = "(None)"
+quality_selector = "Standard v3.0"
+sampler = "Euler a"
+steps = 28
 
 [command_params]
-prompt = "masterpiece, best quality, very aesthetic, absurdres"
-negative_prompt = "((nsfw)), lowres, (bad), text, error, fewer, extra, missing, worst quality, jpeg artifacts, low quality, watermark, unfinished, displeasing, oldest, early, chromatic aberration, signature, extra digits, artistic error, username, scan, [abstract]"
-width = 896
-height = 1152
-steps = 28
-style_selector = ["(None)", "Cinematic", "Photographic", "Anime", "Manga", "Digital Art", "Pixel art", "Fantasy art", "Neonpunk", "3D Model"]
-quality_selector = ["(None)", "Standard v3.0", "Standard v3.1", "Light v3.1", "Heavy v3.1"]
+additional_prompt = "masterpiece, best quality, very aesthetic, absurdres"
+additional_negative_prompt = "((nsfw)), lowres, (bad), text, error, fewer, extra, missing, worst quality, jpeg artifacts, low quality, watermark, unfinished, displeasing, oldest, early, chromatic aberration, signature, extra digits, artistic error, username, scan, [abstract]"
+style_selectors = ["(None)", "Cinematic", "Photographic", "Anime", "Manga", "Digital Art", "Pixel art", "Fantasy art", "Neonpunk", "3D Model"]
+quality_selectors = ["(None)", "Standard v3.0", "Standard v3.1", "Light v3.1", "Heavy v3.1"]
 samplers = ["Euler a", "Euler", "DPM++ 2M Karras", "DPM++ SDE Karras", "DPM++ 2M SDE Karras", "DDIM"]
 
 [blacklist]
