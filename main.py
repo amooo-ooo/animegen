@@ -7,18 +7,122 @@ from discord.ext import commands
 import os
 from gradio_client import Client, handle_file
 import random
-
+import re
+import json
 
 class Config:
     def __init__(self, config_path):
         self.config = toml.load(config_path)
 
+client = Client("Boboiazumi/animagine-xl-3.1")
+config = Config("config.toml")
+
+async def generate(prompt: str = "freiren",
+    negative_prompt: str = "",
+    seed: str = None,
+    custom_width=896,
+    custom_height=1452,
+    guidance_scale=7,
+    sampler="Euler a",
+    style_selector="(None)",
+    steps=28,
+    quality_selector="Standard v3.1", chat = False):
+
+    image, details = client.predict(
+            prompt=prompt + ", " + config.config['command_params']['prompt'],
+            negative_prompt=negative_prompt + ", " + config.config['command_params']["negative_prompt"],
+            seed=seed,
+            guidance_scale=guidance_scale,
+            num_inference_steps=steps,
+            sampler=sampler,
+            aspect_ratio_selector=f"{custom_width} x {custom_height}",
+            style_selector=style_selector,
+            quality_selector=quality_selector,
+            img_path=handle_file('https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png'),
+            img2img_strength=0.65,
+            api_name="/run"
+    )
+
+    path = image[0]["image"]
+    return path
+
+def extract_json(s):
+    # Use a regular expression to find a string that looks like a JSON object
+    match = re.search(r"\{.*?\}", s)
+
+    if match:
+        json_str = match.group()
+        data = json.loads(json_str.replace("'", "\""))
+        remaining_str = s.split('{')[0]
+        print(remaining_str)
+
+        return remaining_str, data
+    return s, None
+
 class Animegen(commands.Bot, ABC):
     def __init__(self, *args, **options):
         super().__init__(*args, **options)
+        self.convo = []
+        self.new = True
+        self.client = Client("Be-Bo/llama-3-chatbot_70b")
+        self.prompt = ('''
+NOTE, SEND ALL MESSAGES IN A JSON FORMAT LIKE SO:
 
+{"type": "text", "message": "..."}
+
+You are an discord bot called Animegen, a discord bot that can use ai models to generate ai anime stye images as we as chatting. But your nickname is Astolfo based on the fate anime series. You use casual language and slang but you still use grammar. You tend to message in lowercase with a lot of ascii based emojis such as ":D", ":p", etc emojies you send are strictly ascii. You mimic the backstory of Astolfo. You act cutesy and kind with charm and confidence. Keep replies short to a maximum of 2 sentences unless it is relevant.
+You also have the ability to send images or photos of yourself by explicitly responding in JSON format, with:
+
+{"type": image,
+"prompt": "..."
+"message": "..."
+}
+
+here is an example:
+
+{"type":"image",
+"prompt":"astolfo, cute, 1girl, sitting, selfie",
+"message": "hehe, like what you see? ;)"}
+
+                   NOTE, ASTOLFO, YOU HAVE PINK HAIR. NOTE, ONLY RESPOND TO RELEVANT MESSAGES, AVOID TOPICS THAT ARE CONTROVERSIAL OR DOES NOT FIT YOUR CHARACTER, BRUSH IT OFF AS THE TOPIC BEING BORING.
+                       ''')
+
+    def chat(self, message):
+        result = self.client.predict(
+		message=self.prompt +"\n\n"+ message if self.new else message,
+		api_name="/chat"
+        )
+
+        if self.new:
+            self.new = False
+        
+        return result
+
+    async def on_message(self, message):
+        if message.author.id in self.convo:
+            # Defer the response
+            async with message.channel.typing():
+                # Generate the response
+                response = json.loads(self.chat(f"{message.author.display_name}: {message.content}"))
+
+                if response["type"] == "image":
+                    path = await generate(prompt=str(response['prompt']), seed = random.randint(0, 2147483647))
+                
+            if response["type"] == "image":
+                with open(path, 'rb') as f:
+                    m = response.get("message", None)
+                    if m:
+                        await message.channel.send(m, file=discord.File(f))
+                    else:
+                        await message.channel.send(file=discord.File(f))
+                os.remove(path)
+            else:
+                await message.channel.send(response["message"] )
+
+
+            
 class Bot:
-    def __init__(self, token, config, client, **options):
+    def __init__(self, token, **options):
         super().__init__(**options)
         instance = Animegen(command_prefix="!", 
                             intents=discord.Intents.all(),
@@ -39,35 +143,6 @@ class Bot:
 
         _NEGATIVE_PROMPT = ", ".join([f"`{m}`" for m in params["negative_prompt"].split(", ")])
         _PROMPT = ", ".join([f"`{m}`" for m in params['prompt'].split(", ")])
-
-        async def generate(prompt: str = "freiren",
-            negative_prompt: str = "",
-            seed: str = None,
-            custom_width=1024,
-            custom_height=1024,
-            guidance_scale=7,
-            sampler="Euler a",
-            style_selector="(None)",
-            steps=28,
-            quality_selector="Standard v3.1"):
-
-            image, details = client.predict(
-                    prompt=prompt + ", " + params["prompt"],
-                    negative_prompt=negative_prompt + ", " + params["negative_prompt"],
-                    seed=seed,
-                    guidance_scale=guidance_scale,
-                    num_inference_steps=steps,
-                    sampler=sampler,
-                    aspect_ratio_selector=f"{custom_width} x {custom_height}",
-                    style_selector=style_selector,
-                    quality_selector=quality_selector,
-                    img_path=handle_file('https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png'),
-                    img2img_strength=0.65,
-                    api_name="/run"
-            )
-
-            path = image[0]["image"]
-            return path
 
         def split(prompt: str,
                 negative_prompt: str):
@@ -97,9 +172,6 @@ class Bot:
                 return t
             return prompt
             
-
-
-
         def embed(user, 
                 prompt: str, 
                 negative_prompt: str,
@@ -133,6 +205,20 @@ class Bot:
 
             #embedVar.set_footer(text=f"You're currenty position {len(queue)} in the queue!")
             return embedVar
+
+        @instance.tree.command(name="chat", description="Join, create or leave a conversation with Animegen")
+        async def chat(interaction: discord.Interaction):
+            if not (interaction.user.id in instance.convo):
+                instance.convo.append(interaction.user.id)
+                await interaction.response.send_message(f"`@{interaction.user.display_name}` has joined the conversation!")
+            else:
+                instance.convo.remove(interaction.user.id)
+                await interaction.response.send_message(f"`@{interaction.user.display_name}` has left the conversation!")
+
+            if instance.convo == []: # refresh
+                instance.client  = Client("Be-Bo/llama-3-chatbot_70b")
+                instance.new = True
+
 
         @instance.tree.command(name="imagine", description="Generate an image")
         @app_commands.describe(prompt = "Tags for generating the image",
@@ -210,7 +296,4 @@ class Bot:
 
 if __name__ == "__main__":
     bot = Bot(
-        ,
-        Config("config.toml"),
-        Client("Boboiazumi/animagine-xl-3.1")
     )
