@@ -97,14 +97,15 @@ class DFAWordBlacklist:
         return result
 
     def replace(self, value: str, replace: str):
+        single_chr = len(replace) != 1 or (
+            len(replace) == 2 and replace.startswith('\\'))
         result = ''
         matches = self.exec(value)
         i = 0
         while matches:
             start, end = matches.pop(0)
             result += value[i:start]
-            result += replace if len(replace) != 1 else (replace *
-                                                         (end - start))
+            result += replace if single_chr else (replace * (end - start))
             i = end
         result += value[i:]
         return result
@@ -217,7 +218,7 @@ class Animegen(commands.Bot, ABC):
                 # Generate the response
                 response = self.blacklist.replace(
                     await self.chat(f"{message.author.display_name}: {message.content}"),
-                    '*')
+                    '\\*')
 
             if match := re.search(r"\[image: ([^\]]*)\]", response, re.IGNORECASE):
                 await self.send_with_image(
