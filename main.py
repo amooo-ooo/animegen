@@ -97,7 +97,7 @@ class DFAWordBlacklist:
         return result
 
     def replace(self, value: str, replace: str):
-        single_chr = len(replace) != 1 or (
+        single_chr = len(replace) == 1 or (
             len(replace) == 2 and replace.startswith('\\'))
         result = ''
         matches = self.exec(value)
@@ -105,7 +105,7 @@ class DFAWordBlacklist:
         while matches:
             start, end = matches.pop(0)
             result += value[i:start]
-            result += replace if single_chr else (replace * (end - start))
+            result += (replace * (end - start)) if single_chr else replace
             i = end
         result += value[i:]
         return result
