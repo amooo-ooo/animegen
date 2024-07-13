@@ -20,4 +20,4 @@ samplers = ["Euler a", "Euler", "DPM++ 2M Karras", "DPM++ SDE Karras", "DPM++ 2M
 
 [blacklist]
 words = ["nsfw", "nude", "naked", "pussy", "vagina", "dick", "cock", "penis", "loli", "shota", "child", "children", "sex", "fuck"]
-files = ["word"]
+files = ["word-blacklist.txt"]
