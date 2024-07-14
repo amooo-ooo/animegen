@@ -196,19 +196,19 @@ class Animegen(commands.Bot, ABC):
         path = image[0]["image"]
         return path
 
-    async def message_as_str(self, message: discord.Message):
-        return f"{message.author.display_name}: {message.clean_content}"
+    async def message_as_str(self, msg: discord.Message):
+        return f"[{msg.created_at}] {msg.author.display_name}: {msg.clean_content}"
 
-    async def chat(self, message_obj: discord.Message):
-        message = await self.message_as_str(message_obj)
+    async def chat(self, message_obj: discord.Message | str):
+        message = message_obj if isinstance(message_obj, str) else await self.message_as_str(message_obj)
         if not self.chat_history:
             history = ''
-            if self.CONFIG_READ_CHANNEL_HISTORY in self.general:
+            if self.CONFIG_READ_CHANNEL_HISTORY in self.general and isinstance(message_obj, discord.Message):
                 length = int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])
-                history = '\n--- CHANNEL HISTORY ---'
-                async for old_msg in message_obj.channel.history(limit=length, oldest_first=True):
-                    history += f'\n{await self.message_as_str(old_msg)}'
-                history += '\n--- END CHANNEL HISTORY ---\n'
+                async for old_msg in message_obj.channel.history(limit=length):
+                    history = f'{await self.message_as_str(old_msg)}\n{history}'
+                history = (f'\n--- CHANNEL HISTORY ---\n'
+                           f'{history}--- END CHANNEL HISTORY ---\n')
                 print(history)
             message = (self.system + history + message)
         elif not (len(self.chat_history) % self.general["context_window"]):
@@ -231,7 +231,7 @@ class Animegen(commands.Bot, ABC):
         return result
 
     @contextlib.asynccontextmanager
-    async def gen_image(self, prompt) -> discord.File | gradio_exc.AppError:
+    async def gen_image(self, prompt):
         try:
             path = await self.generate(prompt)
             try:
@@ -260,15 +260,21 @@ class Animegen(commands.Bot, ABC):
                     text_msg = re.sub(self.IMAGE_EMBED_REGEX, '',
                                       response, 0, re.IGNORECASE)
                     if isinstance(img, Exception):
-                        await message.channel.send(
-                            f'{text_msg} [gradio: image gen failed: {img}]')
+                        response = self.blacklist.replace(
+                            await self.chat(
+                                f'dev: [image generation failed with error: '
+                                f'"{img}". ur original msg was "{text_msg}". '
+                                f'please send a followup message (please note '
+                                f'images will not work in your followup)]'),
+                            '\\*')
+                        await message.channel.send(response)
                     else:
                         await message.channel.send(text_msg, file=img)
             else:
                 await message.channel.send(response)
 
     async def on_message(self, message: discord.Message):
-        if message.author.id in self.chat_participants:
+        if message.author.id in self.chat_participants and self.chat_client is not None:
             self.add_task(self.handle_message(message))
 
 
