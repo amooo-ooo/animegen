@@ -1,4 +1,6 @@
 from abc import ABC
+import contextlib
+import datetime
 from typing import Iterable
 
 import discord
@@ -112,7 +114,6 @@ class DFAWordBlacklist:
         return result
 
 
-
 class Animegen(commands.Bot, ABC):
     def __init__(self, config_path="config.toml",
                  *args, **options):
@@ -120,6 +121,8 @@ class Animegen(commands.Bot, ABC):
         self.img_client = Client("Boboiazumi/animagine-xl-3.1")
         self.chat_client = Client("Be-Bo/llama-3-chatbot_70b")
         self.config = toml.load(config_path)
+
+        self._background_tasks = []
 
         self.blacklist = DFAWordBlacklist()
         if 'words' in self.config['blacklist']:
@@ -150,6 +153,13 @@ class Animegen(commands.Bot, ABC):
         with open(Path(path, "reminder.txt"), "r") as f:
             self.reminder = f.read().strip() + "\n"
 
+    def add_task(self, coro):
+        task = asyncio.create_task(coro)
+        self._background_tasks.append(task)
+        if (len(self._background_tasks) > 5):
+            self._background_tasks[random.randint(1, 3)].cancel()
+        task.add_done_callback(self._background_tasks.remove)
+
     async def generate(
             self,
             prompt: str | None = "frieren",
@@ -159,7 +169,8 @@ class Animegen(commands.Bot, ABC):
         image, details = await asyncio.threads.to_thread(functools.partial(
             self.img_client.predict,
             prompt=prompt + ", " + self.params['additional_prompt'],
-            negative_prompt=negative_prompt + ", " + self.params["additional_negative_prompt"],
+            negative_prompt=negative_prompt + ", " +
+            self.params["additional_negative_prompt"],
             seed=kwargs.get(
                 "seed", random.randint(0, 2147483647)),
             guidance_scale=7,
@@ -188,10 +199,14 @@ class Animegen(commands.Bot, ABC):
         elif not (len(self.chat_history) % self.general["context_window"]):
             message = (self.reminder + message)
 
-        result = await asyncio.threads.to_thread(functools.partial(
-            self.chat_client.predict,
-            message=message,
-            api_name="/chat"))
+        try:
+            result = await asyncio.threads.to_thread(functools.partial(
+                self.chat_client.predict,
+                message=message,
+                api_name="/chat"))
+        except Exception as e:
+            if 'debug' in self.general and self.general['debug']:
+                return f"```{e}```"
 
         if len(self.chat_history) >= self.general["context_window"]:
             self.chat_history = self.chat_history[1:] + [result]
@@ -200,35 +215,44 @@ class Animegen(commands.Bot, ABC):
 
         return result
 
-    async def send_with_image(self, channel, message, prompt):
+    @contextlib.asynccontextmanager
+    async def gen_image(self, prompt):
         try:
             path = await self.generate(prompt)
-            with open(path, 'rb') as f:
-                await channel.send(message, file=discord.File(f))
-            os.remove(path)
+            try:
+                with open(path, 'rb') as f:
+                    yield discord.File(f)
+            finally:
+                os.remove(path)
         except gradio_exc.AppError as e:
-            pass
+            yield None
             # TODO: handle image generation exception
             # await channel.send(
             #     message + f' [gradio: image gen failed: {str(e)}]')
 
-    async def on_message(self, message):
-        if message.author.id in self.chat_participants:
-            # Defer the response
-            async with message.channel.typing():
-                # Generate the response
-                response = self.blacklist.replace(
-                    await self.chat(f"{message.author.display_name}: {message.content}"),
-                    '\\*')
+    async def handle_message(self, message: discord.Message):
+        # Defer the response
+        async with message.channel.typing():
+            # Generate the response
+            response = self.blacklist.replace(
+                await self.chat(f"{message.author.display_name}: {message.content}"),
+                '\\*')
+            if 'debug' in self.general and self.general['debug']:
+                print(response)
 
             if match := re.search(r"\[image: ([^\]]*)\]", response, re.IGNORECASE):
-                await self.send_with_image(
-                    message.channel, re.
-                    sub(r"\[image: [^\]]*\]", '',
-                        response, 0, re.IGNORECASE),
-                    match.group(1))
+                async with self.gen_image(match.group(1)) as img:
+                    await message.channel.send(
+                        re.sub(r"\[image: [^\]]*\]", '',
+                               response, 0, re.IGNORECASE),
+                        **({"file": img} if img is not None else {}),
+                        **{})
             else:
                 await message.channel.send(response)
+
+    async def on_message(self, message: discord.Message):
+        if message.author.id in self.chat_participants:
+            self.add_task(self.handle_message(message))
 
 
 class Bot:
@@ -246,12 +270,13 @@ class Bot:
             except Exception as e:
                 print(e)
 
-        blacklist = instance.config['blacklist']['words']
         verbose = instance.general['verbose']
         watchlist = {}
 
-        PROMPT = instance.params["additional_prompt"].replace(", ", "`, `") + "`."
-        NEGATIVE_PROMPT = instance.params["additional_negative_prompt"].replace(", ", "`, `") + "`."
+        PROMPT = instance.params["additional_prompt"].replace(
+            ", ", "`, `") + "`."
+        NEGATIVE_PROMPT = instance.params["additional_negative_prompt"].replace(
+            ", ", "`, `") + "`."
 
         def split(prompt: str,
                   negative_prompt: str):
@@ -283,13 +308,12 @@ class Bot:
             embedVar.add_field(name="Prompt", value=prompt, inline=False)
             embedVar.add_field(name="Negative Prompt",
                                value=negative_prompt, inline=False)
-        
+
             for title, value in kwargs.items():
                 embedVar.add_field(name=title.title(),
                                    value=value, inline=True)
 
             return embedVar
-            
 
         @instance.tree.command(name="chat", description="Join, create or leave a conversation with Animegen")
         async def chat(interaction: discord.Interaction):
@@ -322,8 +346,10 @@ class Bot:
                 negative_prompt: str = instance.defaults['negative_prompt'],
                 sampler: str = instance.defaults['sampler'],
                 steps: int = instance.defaults['steps'],
-                width: int = int(instance.defaults['aspect_ratio'].split(" x ")[0]),
-                height: int = int(instance.defaults['aspect_ratio'].split(" x ")[1]),
+                width: int = int(
+                    instance.defaults['aspect_ratio'].split(" x ")[0]),
+                height: int = int(
+                    instance.defaults['aspect_ratio'].split(" x ")[1]),
                 quality_selector: str = instance.defaults['quality_selector'],
                 style_selector: str = instance.defaults['style_selector'],
                 seed: int = -1):
@@ -364,7 +390,7 @@ class Bot:
                                   prompt,
                                   negative_prompt,
                                   kwargs)
-                
+
                 path = await instance.generate(prompt, negative_prompt,  kwargs)
 
                 with open(path, 'rb') as f:
@@ -375,23 +401,21 @@ class Bot:
                 time = ':'.join(str(e).split(':')[2:])[:5]
                 await interaction.followup.send(f"> Quota was met for generating images. Go touch some grass for {time} minute(s) and come back!")
                 print(e)
-                
-                
+
         # moderation commands start here
         @app_commands.guild_only()
         @app_commands.default_permissions(kick_members=True)
         @instance.tree.command(name="kick", description="Kick a user from the Discord server.", )
         @app_commands.describe(member="Discord user", reason="Reason why")
-        async def kick(interaction, member: discord.Member, *, reason: str="None"):
+        async def kick(interaction, member: discord.Member, *, reason: str = "None"):
             await member.kick(reason=reason)
             await interaction.response.send_message(f'> User `@{member.display_name}` has been kicked!')
-
 
         @app_commands.guild_only()
         @app_commands.default_permissions(administrator=True, ban_members=True)
         @instance.tree.command(name="ban", description="Ban a user from the Discord server.")
         @app_commands.describe(member="Discord user", reason="Reason why")
-        async def ban(interaction, member: discord.Member, *, reason: str="None"):
+        async def ban(interaction, member: discord.Member, *, reason: str = "None"):
             await member.ban(reason=reason)
             await interaction.response.send_message(f'> User `@{member.display_name}` has been banned!')
 
@@ -404,43 +428,41 @@ class Bot:
             await interaction.guild.unban(user)
             await interaction.response.send_message(f'> User `@{user.display_name}` has been unbanned!')
 
-
         @app_commands.guild_only()
         @app_commands.default_permissions(administrator=True, mute_members=True)
         @instance.tree.command(name="mute", description="Mute a user's messages.")
         @app_commands.describe(member="Discord user", reason="Reason why", time="Length of mute in minutes")
-        async def mute(interaction, member: discord.Member, time: int, *, reason: str="None"):
+        async def mute(interaction, member: discord.Member, time: int, *, reason: str = "None"):
             end_time = discord.utils.utcnow() + timedelta(minutes=time)
-            
+
             await member.edit(timed_out_until=end_time, reason=reason)
             await interaction.response.send_message(f'> User `@{member.display_name}` has been muted for {time} minutes!')
-            await member.send(f'You have been muted in {interaction.guild.name} for {time} minutes' + 
+            await member.send(f'You have been muted in {interaction.guild.name} for {time} minutes' +
                               (f' for the following reason: {reason}!' if reason else '!'))
-
 
         @app_commands.guild_only()
         @app_commands.default_permissions(administrator=True, mute_members=True)
         @instance.tree.command(name="unmute", description="Unmute a user's messages.")
         @app_commands.describe(member="Discord user")
         async def unmute(interaction, member: discord.Member):
-            
+
             await member.edit(timed_out_until=None)
 
             await interaction.response.send_message(f'> User `@{member.display_name}` has been unmuted!')
             await member.send(f'You have been unmuted in {interaction.guild.name}.')
 
-        
         @app_commands.guild_only()
         @app_commands.default_permissions(administrator=True, moderate_members=True)
         @instance.tree.command(name="warn", description="Warn a user and add them to the watchlist.")
         @app_commands.describe(member="Discord user", reason="Reason why")
-        async def warn(interaction, member: discord.Member, *, reason: str="None"):
+        async def warn(interaction, member: discord.Member, *, reason: str = "None"):
             dm_channel = await member.create_dm()
             await dm_channel.send(f'You have been warned for the following reason: {reason}')
             watchlist[member.id] = reason
             await interaction.response.send_message(f'> User `@{member.display_name}` has been warned and added to the watchlist!')
 
         instance.run(token)
+
 
 if __name__ == "__main__":
     load_dotenv()
