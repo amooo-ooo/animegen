@@ -220,8 +220,7 @@ class Animegen(commands.Bot, ABC):
         with open(path, "a") as f:
             f.write(context + "\n")
 
-    async def chat(self, message_obj: discord.Message | str):
-        message = message_obj if isinstance(message_obj, str) else await self.message_as_str(message_obj)
+    async def chat(self, message, username):
         memory = ""
         username = None if isinstance(
             message_obj, str) else message_obj.author.display_name
@@ -261,7 +260,7 @@ class Animegen(commands.Bot, ABC):
         return result
 
     @contextlib.asynccontextmanager
-    async def gen_image(self, prompt):
+    async def gen_image(self, prompt) -> discord.File | gradio_exc.AppError:
         try:
             path = await self.generate(prompt)
             try:
