@@ -2,9 +2,6 @@
 context_window = 10
 verbose = false
 
-[moderation]
-admin_role_name = "admin"
-
 [defaults]
 prompt = "frieren"
 negative_prompt = ""

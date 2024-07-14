@@ -5,6 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from gradio_client import Client, handle_file, exceptions as gradio_exc
+from datetime import timedelta
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -246,7 +247,6 @@ class Bot:
                 print(e)
 
         blacklist = instance.config['blacklist']['words']
-        moderation = instance.config['moderation']
         verbose = instance.general['verbose']
         watchlist = {}
 
@@ -289,6 +289,7 @@ class Bot:
                                    value=value, inline=True)
 
             return embedVar
+            
 
         @instance.tree.command(name="chat", description="Join, create or leave a conversation with Animegen")
         async def chat(interaction: discord.Interaction):
@@ -377,22 +378,25 @@ class Bot:
                 
                 
         # moderation commands start here
-        @commands.has_role(moderation['admin_role_name'])
-        @instance.tree.command(name="kick", description="Kick a user from the Discord server.")
+        @app_commands.guild_only()
+        @app_commands.default_permissions(kick_members=True)
+        @instance.tree.command(name="kick", description="Kick a user from the Discord server.", )
         @app_commands.describe(member="Discord user", reason="Reason why")
         async def kick(interaction, member: discord.Member, *, reason: str="None"):
             await member.kick(reason=reason)
             await interaction.response.send_message(f'> User `@{member.display_name}` has been kicked!')
 
 
-        @commands.has_role(moderation['admin_role_name'])
+        @app_commands.guild_only()
+        @app_commands.default_permissions(administrator=True, ban_members=True)
         @instance.tree.command(name="ban", description="Ban a user from the Discord server.")
         @app_commands.describe(member="Discord user", reason="Reason why")
         async def ban(interaction, member: discord.Member, *, reason: str="None"):
             await member.ban(reason=reason)
             await interaction.response.send_message(f'> User `@{member.display_name}` has been banned!')
 
-        @commands.has_role(moderation['admin_role_name'])
+        @app_commands.guild_only()
+        @app_commands.default_permissions(administrator=True, ban_members=True)
         @instance.tree.command(name="unban", description="Unban a user from the Discord server.")
         @app_commands.describe(user_id="ID of the user to unban")
         async def unban(interaction, user_id: int):
@@ -400,21 +404,34 @@ class Bot:
             await interaction.guild.unban(user)
             await interaction.response.send_message(f'> User `@{user.display_name}` has been unbanned!')
 
-        @commands.has_role(moderation['admin_role_name'])
-        @instance.tree.command(name="mute", description="Server mute a user.")
-        @app_commands.describe(member="Discord user", reason="Reason why")
-        async def mute(interaction, member: discord.Member, *, reason: str="None"):
-            await member.edit(mute=True, reason=reason)
-            await interaction.response.send_message(f'> User `@{member.display_name}` has been server muted!')
 
-        @commands.has_role(moderation['admin_role_name'])
-        @instance.tree.command(name="unmute", description="Server unmute a user.")
+        @app_commands.guild_only()
+        @app_commands.default_permissions(administrator=True, mute_members=True)
+        @instance.tree.command(name="mute", description="Mute a user's messages.")
+        @app_commands.describe(member="Discord user", reason="Reason why", time="Length of mute in minutes")
+        async def mute(interaction, member: discord.Member, time: int, *, reason: str="None"):
+            end_time = discord.utils.utcnow() + timedelta(minutes=time)
+            
+            await member.edit(timed_out_until=end_time, reason=reason)
+            await interaction.response.send_message(f'> User `@{member.display_name}` has been muted for {time} minutes!')
+            await member.send(f'You have been muted in {interaction.guild.name} for {time} minutes' + 
+                              (f' for the following reason: {reason}!' if reason else '!'))
+
+
+        @app_commands.guild_only()
+        @app_commands.default_permissions(administrator=True, mute_members=True)
+        @instance.tree.command(name="unmute", description="Unmute a user's messages.")
         @app_commands.describe(member="Discord user")
         async def unmute(interaction, member: discord.Member):
-            await member.edit(mute=False)
-            await interaction.response.send_message(f'> User `@{member.display_name}` has been server unmuted!')
+            
+            await member.edit(timed_out_until=None)
+
+            await interaction.response.send_message(f'> User `@{member.display_name}` has been unmuted!')
+            await member.send(f'You have been unmuted in {interaction.guild.name}.')
+
         
-        @commands.has_role(moderation['admin_role_name'])
+        @app_commands.guild_only()
+        @app_commands.default_permissions(administrator=True, moderate_members=True)
         @instance.tree.command(name="warn", description="Warn a user and add them to the watchlist.")
         @app_commands.describe(member="Discord user", reason="Reason why")
         async def warn(interaction, member: discord.Member, *, reason: str="None"):
