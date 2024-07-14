@@ -115,11 +115,14 @@ class DFAWordBlacklist:
 
 
 class Animegen(commands.Bot, ABC):
+    IMAGE_EMBED_REGEX = r"\[\s*[image]{3,5}\s*:\s*([^\]]*)\s*\]"
+    CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
+
     def __init__(self, config_path="config.toml",
                  *args, **options):
         super().__init__(*args, **options)
         self.img_client = Client("Boboiazumi/animagine-xl-3.1")
-        self.chat_client = Client("Be-Bo/llama-3-chatbot_70b")
+        self.chat_client: Client | None = Client("Be-Bo/llama-3-chatbot_70b")
         self.config = toml.load(config_path)
 
         self._background_tasks = []
@@ -193,9 +196,21 @@ class Animegen(commands.Bot, ABC):
         path = image[0]["image"]
         return path
 
-    async def chat(self, message):
+    async def message_as_str(self, message: discord.Message):
+        return f"{message.author.display_name}: {message.clean_content}"
+
+    async def chat(self, message_obj: discord.Message):
+        message = await self.message_as_str(message_obj)
         if not self.chat_history:
-            message = (self.system + message)
+            history = ''
+            if self.CONFIG_READ_CHANNEL_HISTORY in self.general:
+                length = int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])
+                history = '\n--- CHANNEL HISTORY ---'
+                async for old_msg in message_obj.channel.history(limit=length, oldest_first=True):
+                    history += f'\n{await self.message_as_str(old_msg)}'
+                history += '\n--- END CHANNEL HISTORY ---\n'
+                print(history)
+            message = (self.system + history + message)
         elif not (len(self.chat_history) % self.general["context_window"]):
             message = (self.reminder + message)
 
@@ -216,7 +231,7 @@ class Animegen(commands.Bot, ABC):
         return result
 
     @contextlib.asynccontextmanager
-    async def gen_image(self, prompt):
+    async def gen_image(self, prompt) -> discord.File | gradio_exc.AppError:
         try:
             path = await self.generate(prompt)
             try:
@@ -225,7 +240,7 @@ class Animegen(commands.Bot, ABC):
             finally:
                 os.remove(path)
         except gradio_exc.AppError as e:
-            yield None
+            yield e
             # TODO: handle image generation exception
             # await channel.send(
             #     message + f' [gradio: image gen failed: {str(e)}]')
@@ -235,18 +250,20 @@ class Animegen(commands.Bot, ABC):
         async with message.channel.typing():
             # Generate the response
             response = self.blacklist.replace(
-                await self.chat(f"{message.author.display_name}: {message.content}"),
+                await self.chat(message),
                 '\\*')
             if 'debug' in self.general and self.general['debug']:
                 print(response)
 
-            if match := re.search(r"\[image: ([^\]]*)\]", response, re.IGNORECASE):
+            if match := re.search(self.IMAGE_EMBED_REGEX, response, re.IGNORECASE):
                 async with self.gen_image(match.group(1)) as img:
-                    await message.channel.send(
-                        re.sub(r"\[image: [^\]]*\]", '',
-                               response, 0, re.IGNORECASE),
-                        **({"file": img} if img is not None else {}),
-                        **{})
+                    text_msg = re.sub(self.IMAGE_EMBED_REGEX, '',
+                                      response, 0, re.IGNORECASE)
+                    if isinstance(img, Exception):
+                        await message.channel.send(
+                            f'{text_msg} [gradio: image gen failed: {img}]')
+                    else:
+                        await message.channel.send(text_msg, file=img)
             else:
                 await message.channel.send(response)
 
@@ -324,9 +341,13 @@ class Bot:
                 instance.chat_participants.remove(interaction.user.id)
                 await interaction.response.send_message(f"`@{interaction.user.display_name}` has left the conversation!")
 
-            if instance.chat_participants == []:  # refresh
-                instance.client = Client("Be-Bo/llama-3-chatbot_70b")
+            if not instance.chat_participants:  # refresh
+                instance.chat_client = None
                 instance.chat_history = []
+            if instance.chat_participants and instance.chat_client is None:
+                async with interaction.channel.typing():
+                    instance.chat_client = await asyncio.to_thread(functools.partial(
+                        Client, "Be-Bo/llama-3-chatbot_70b"))
 
         @instance.tree.command(name="imagine", description="Generate an image")
         @app_commands.describe(

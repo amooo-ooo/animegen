@@ -1,6 +1,7 @@
 [general]
 context_window = 10
 verbose = false
+read_channel_history = 16
 
 [defaults]
 prompt = "frieren"
