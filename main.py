@@ -203,7 +203,9 @@ class Animegen(commands.Bot, ABC):
         message = message_obj if isinstance(message_obj, str) else await self.message_as_str(message_obj)
         if not self.chat_history:
             history = ''
-            if self.CONFIG_READ_CHANNEL_HISTORY in self.general and isinstance(message_obj, discord.Message):
+            if (self.CONFIG_READ_CHANNEL_HISTORY in self.general
+                    and int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])
+                    and isinstance(message_obj, discord.Message)):
                 length = int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])
                 async for old_msg in message_obj.channel.history(limit=length):
                     history = f'{await self.message_as_str(old_msg)}\n{history}'
