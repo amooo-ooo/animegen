@@ -115,11 +115,14 @@ class DFAWordBlacklist:
 
 
 class Animegen(commands.Bot, ABC):
+    IMAGE_EMBED_REGEX = r"\[\s*[image]{3,5}\s*:\s*([^\]]*)\s*\]"
+    CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
+
     def __init__(self, config_path="config.toml",
                  *args, **options):
         super().__init__(*args, **options)
         self.img_client = Client("Boboiazumi/animagine-xl-3.1")
-        self.chat_client = Client("Be-Bo/llama-3-chatbot_70b")
+        self.chat_client: Client | None = Client("Be-Bo/llama-3-chatbot_70b")
         self.config = toml.load(config_path)
 
         self._background_tasks = []
@@ -148,7 +151,13 @@ class Animegen(commands.Bot, ABC):
         self.chat_history = []
         self.user_memories = set(os.listdir(Path(Path(__file__).parent, "memory")))
 
-        path = Path(Path(__file__).parent, "prompts")
+        mem_path = Path(Path(__file__).parent, "memory")
+        if not mem_path.exists():
+            os.makedirs(mem_path)
+        self.user_memories = set(os.listdir(mem_path))
+
+        path = Path(Path(__file__).parent,
+                    self.general["prompts"] if 'prompts' in self.general else 'prompts')
         self.memory_path = Path(Path(__file__).parent, "memory")
         with open(Path(path, "system.txt"), "r") as f:
             self.system = f.read().strip() + "\n"
@@ -156,6 +165,9 @@ class Animegen(commands.Bot, ABC):
         with open(Path(path, "reminder.txt"), "r") as f:
             self.reminder = f.read().strip() + "\n"
             
+        with open(Path(path, "memory.txt"), "r") as f:
+            self.memory = f.read().strip() + "\n"
+
         with open(Path(path, "memory.txt"), "r") as f:
             self.memory = f.read().strip() + "\n"
 
@@ -217,15 +229,47 @@ class Animegen(commands.Bot, ABC):
             f.write(context + "\n")
             
 
-    async def chat(self, message, username):
+    def load_memory(self, username):
+        path = Path(self.memory_path, str(username) + ".txt")
+        if os.path.isfile(path):
+            with open(path, "r") as f:
+                return (f.read().strip())
+        return ""
+
+    async def save_memory(self, username):
+        path = Path(self.memory_path, str(username) + ".txt")
+        context = await asyncio.threads.to_thread(functools.partial(
+            self.chat_client.predict,
+            message=self.memory.replace("{username}", username),
+            api_name="/chat"))
+
+        with open(path, "a") as f:
+            f.write(context + "\n")
+
+    async def message_as_str(self, msg: discord.Message):
+        return f"[{msg.created_at}] {msg.author.display_name}: {msg.clean_content}"
+
+    async def chat(self, message_obj: discord.Message | str):
+        message = message_obj if isinstance(message_obj, str) else await self.message_as_str(message_obj)
         memory = ""
+        username = None if isinstance(
+            message_obj, str) else message_obj.author.display_name
         if username in self.chat_context:
             memory = (f'\n--- LONG TERM MEMORY WITH {username} ---\n'
                       f'{self.load_memory(username)}--- END LONG TERM MEMORY ---')
             self.chat_context.remove(username)
-                
         if not self.chat_history:
-            message = (self.system + message)
+            history = ''
+            if (self.CONFIG_READ_CHANNEL_HISTORY in self.general
+                    and int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])
+                    and isinstance(message_obj, discord.Message)):
+                length = int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])
+                async for old_msg in message_obj.channel.history(limit=length):
+                    history = f'{await self.message_as_str(old_msg)}\n{history}'
+                history = (f'\n--- CHANNEL HISTORY ---\n'
+                           f'{history}--- END CHANNEL HISTORY ---\n')
+                print(history)
+            message = (self.system + history + message)
         elif not (len(self.chat_history) % self.general["context_window"]):
             message = (self.reminder + message)
 
@@ -255,7 +299,7 @@ class Animegen(commands.Bot, ABC):
             finally:
                 os.remove(path)
         except gradio_exc.AppError as e:
-            yield None
+            yield e
             # TODO: handle image generation exception
             # await channel.send(
             #     message + f' [gradio: image gen failed: {str(e)}]')
@@ -265,23 +309,31 @@ class Animegen(commands.Bot, ABC):
         async with message.channel.typing():
             # Generate the response
             response = self.blacklist.replace(
-                await self.chat(f"{message.author.display_name}: {message.content}", username=message.author.display_name),
+                await self.chat(message),
                 '\\*')
             if 'debug' in self.general and self.general['debug']:
                 print(response)
 
-            if match := re.search(r"\[image: ([^\]]*)\]", response, re.IGNORECASE):
+            if match := re.search(self.IMAGE_EMBED_REGEX, response, re.IGNORECASE):
                 async with self.gen_image(match.group(1)) as img:
-                    await message.channel.send(
-                        re.sub(r"\[image: [^\]]*\]", '',
-                               response, 0, re.IGNORECASE),
-                        **({"file": img} if img is not None else {}),
-                        **{})
+                    text_msg = re.sub(self.IMAGE_EMBED_REGEX, '',
+                                      response, 0, re.IGNORECASE)
+                    if isinstance(img, Exception):
+                        response = self.blacklist.replace(
+                            await self.chat(
+                                f'dev: [image generation failed with error: '
+                                f'"{img}". ur original msg was "{text_msg}". '
+                                f'please send a followup message (please note '
+                                f'images will not work in your followup)]'),
+                            '\\*')
+                        await message.channel.send(response)
+                    else:
+                        await message.channel.send(text_msg, file=img)
             else:
                 await message.channel.send(response)
 
     async def on_message(self, message: discord.Message):
-        if message.author.id in self.chat_participants:
+        if message.author.id in self.chat_participants and self.chat_client is not None:
             self.add_task(self.handle_message(message))
 
 
@@ -335,6 +387,9 @@ class Bot:
             
             embedVar.set_author(name=instance.user.display_name, icon_url=instance.user.display_avatar)
 
+            embedVar.set_author(name=instance.user.display_name,
+                                icon_url=instance.user.display_avatar)
+
             prompt, negative_prompt = split(prompt, negative_prompt)
 
             embedVar.add_field(name="Prompt", value=prompt, inline=False)
@@ -361,6 +416,21 @@ class Bot:
             embedVar.set_author(name=instance.user.display_name, icon_url=instance.user.display_avatar)
             return embedVar
 
+        def embed_logs(title: str,
+                       description: str,
+                       thumbnail: str | None = None):
+
+            embedVar = discord.Embed(title=title,
+                                     description=description,
+                                     color=0xf4e1cc)
+
+            if thumbnail:
+                embedVar.set_thumbnail(url=thumbnail)
+
+            embedVar.set_author(name=instance.user.display_name,
+                                icon_url=instance.user.display_avatar)
+            return embedVar
+
         @instance.tree.command(name="chat", description="Join, create or leave a conversation with Animegen")
         async def chat(interaction: discord.Interaction):
             if not (interaction.user.id in instance.chat_participants):
@@ -372,9 +442,13 @@ class Bot:
                 await interaction.response.send_message(f"`@{interaction.user.display_name}` has left the conversation!")
                 await instance.save_memory(interaction.user.display_name)
 
-            if instance.chat_participants == []:  # refresh
-                instance.client = Client("Be-Bo/llama-3-chatbot_70b")
+            if not instance.chat_participants:  # refresh
+                instance.chat_client = None
                 instance.chat_history = []
+            if instance.chat_participants and instance.chat_client is None:
+                async with interaction.channel.typing():
+                    instance.chat_client = await asyncio.to_thread(functools.partial(
+                        Client, "Be-Bo/llama-3-chatbot_70b"))
 
         @instance.tree.command(name="imagine", description="Generate an image")
         @app_commands.describe(
