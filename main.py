@@ -149,8 +149,10 @@ class Animegen(commands.Bot, ABC):
         self.chat_participants = []
         self.chat_context = []
         self.chat_history = []
-        self.user_memories = set(os.listdir(
-            Path(Path(__file__).parent, "memory")))
+
+        mem_path = Path(Path(__file__).parent, "memory")
+        os.makedirs(mem_path)
+        self.user_memories = set(os.listdir(mem_path))
 
         path = Path(Path(__file__).parent, "prompts")
         self.memory_path = Path(Path(__file__).parent, "memory")
