@@ -1,5 +1,6 @@
 [general]
 context_window = 10
+memory_window = 50
 verbose = false
 read_channel_history = 16
 
