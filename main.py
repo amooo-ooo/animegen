@@ -245,7 +245,13 @@ class Bot:
             except Exception as e:
                 print(e)
 
+<<<<<<< Updated upstream
+=======
+        blacklist = instance.config['blacklist']['words']
+        moderation = instance.config['moderation']
+>>>>>>> Stashed changes
         verbose = instance.general['verbose']
+        watchlist = {}
 
         PROMPT = instance.params["additional_prompt"].replace(", ", "`, `") + "`."
         NEGATIVE_PROMPT = instance.params["additional_negative_prompt"].replace(", ", "`, `") + "`."
@@ -371,9 +377,56 @@ class Bot:
                 time = ':'.join(str(e).split(':')[2:])[:5]
                 await interaction.followup.send(f"> Quota was met for generating images. Go touch some grass for {time} minute(s) and come back!")
                 print(e)
+                
+                
+        # moderation commands start here
+        @commands.has_role(moderation['admin_role_name'])
+        @instance.tree.command(name="kick", description="Kick a user from the Discord server.")
+        @app_commands.describe(member="Discord user", reason="Reason why")
+        async def kick(interaction, member: discord.Member, *, reason: str="None"):
+            await member.kick(reason=reason)
+            await interaction.response.send_message(f'> User `@{member.display_name}` has been kicked!')
+
+
+        @commands.has_role(moderation['admin_role_name'])
+        @instance.tree.command(name="ban", description="Ban a user from the Discord server.")
+        @app_commands.describe(member="Discord user", reason="Reason why")
+        async def ban(interaction, member: discord.Member, *, reason: str="None"):
+            await member.ban(reason=reason)
+            await interaction.response.send_message(f'> User `@{member.display_name}` has been banned!')
+
+        @commands.has_role(moderation['admin_role_name'])
+        @instance.tree.command(name="unban", description="Unban a user from the Discord server.")
+        @app_commands.describe(user_id="ID of the user to unban")
+        async def unban(interaction, user_id: int):
+            user = await bot.fetch_user(user_id)
+            await interaction.guild.unban(user)
+            await interaction.response.send_message(f'> User `@{user.display_name}` has been unbanned!')
+
+        @commands.has_role(moderation['admin_role_name'])
+        @instance.tree.command(name="mute", description="Server mute a user.")
+        @app_commands.describe(member="Discord user", reason="Reason why")
+        async def mute(interaction, member: discord.Member, *, reason: str="None"):
+            await member.edit(mute=True, reason=reason)
+            await interaction.response.send_message(f'> User `@{member.display_name}` has been server muted!')
+
+        @commands.has_role(moderation['admin_role_name'])
+        @instance.tree.command(name="unmute", description="Server unmute a user.")
+        @app_commands.describe(member="Discord user")
+        async def unmute(interaction, member: discord.Member):
+            await member.edit(mute=False)
+            await interaction.response.send_message(f'> User `@{member.display_name}` has been server unmuted!')
+        
+        @commands.has_role(moderation['admin_role_name'])
+        @instance.tree.command(name="warn", description="Warn a user and add them to the watchlist.")
+        @app_commands.describe(member="Discord user", reason="Reason why")
+        async def warn(interaction, member: discord.Member, *, reason: str="None"):
+            dm_channel = await member.create_dm()
+            await dm_channel.send(f'You have been warned for the following reason: {reason}')
+            watchlist[member.id] = reason
+            await interaction.response.send_message(f'> User `@{member.display_name}` has been warned and added to the watchlist!')
 
         instance.run(token)
-
 
 if __name__ == "__main__":
     load_dotenv()
