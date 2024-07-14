@@ -245,11 +245,8 @@ class Bot:
             except Exception as e:
                 print(e)
 
-<<<<<<< Updated upstream
-=======
         blacklist = instance.config['blacklist']['words']
         moderation = instance.config['moderation']
->>>>>>> Stashed changes
         verbose = instance.general['verbose']
         watchlist = {}
 
