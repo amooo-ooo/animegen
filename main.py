@@ -151,10 +151,12 @@ class Animegen(commands.Bot, ABC):
         self.chat_history = []
 
         mem_path = Path(Path(__file__).parent, "memory")
-        os.makedirs(mem_path)
+        if not mem_path.exists():
+            os.makedirs(mem_path)
         self.user_memories = set(os.listdir(mem_path))
 
-        path = Path(Path(__file__).parent, "prompts")
+        path = Path(Path(__file__).parent,
+                    self.general["prompts"] if 'prompts' in self.general else 'prompts')
         self.memory_path = Path(Path(__file__).parent, "memory")
         with open(Path(path, "system.txt"), "r") as f:
             self.system = f.read().strip() + "\n"
