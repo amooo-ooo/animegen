@@ -247,7 +247,12 @@ class Animegen(commands.Bot, ABC):
             f.write(context + "\n")
 
     async def message_as_str(self, msg: discord.Message):
-        return f"[{msg.created_at}] {msg.author.display_name}: {msg.clean_content}"
+        replies = ''
+        if msg.reference is not None:
+            reply_msg = await self.message_as_str(
+                await msg.channel.fetch_message(msg.reference.message_id))
+            replies = f'[in response to: `{reply_msg}`]'
+        return f"{replies}[{msg.created_at}] {msg.author.display_name}: {msg.clean_content}"
 
     async def chat(self, message_obj: discord.Message | str):
         message = message_obj if isinstance(message_obj, str) else await self.message_as_str(message_obj)
