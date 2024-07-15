@@ -2,6 +2,8 @@
 context_window = 10
 memory_window = 50
 verbose = false
+read_channel_history = 16
+prompts_dir = 'prompts'
 
 [defaults]
 prompt = "frieren"
@@ -15,10 +17,49 @@ steps = 28
 [command_params]
 additional_prompt = "masterpiece, best quality, very aesthetic, absurdres"
 additional_negative_prompt = "((nsfw)), lowres, (bad), text, error, fewer, extra, missing, worst quality, jpeg artifacts, low quality, watermark, unfinished, displeasing, oldest, early, chromatic aberration, signature, extra digits, artistic error, username, scan, [abstract]"
-style_selectors = ["(None)", "Cinematic", "Photographic", "Anime", "Manga", "Digital Art", "Pixel art", "Fantasy art", "Neonpunk", "3D Model"]
-quality_selectors = ["(None)", "Standard v3.0", "Standard v3.1", "Light v3.1", "Heavy v3.1"]
-samplers = ["Euler a", "Euler", "DPM++ 2M Karras", "DPM++ SDE Karras", "DPM++ 2M SDE Karras", "DDIM"]
+style_selectors = [
+	"(None)",
+	"Cinematic",
+	"Photographic",
+	"Anime",
+	"Manga",
+	"Digital Art",
+	"Pixel art",
+	"Fantasy art",
+	"Neonpunk",
+	"3D Model",
+]
+quality_selectors = [
+	"(None)",
+	"Standard v3.0",
+	"Standard v3.1",
+	"Light v3.1",
+	"Heavy v3.1",
+]
+samplers = [
+	"Euler a",
+	"Euler",
+	"DPM++ 2M Karras",
+	"DPM++ SDE Karras",
+	"DPM++ 2M SDE Karras",
+	"DDIM",
+]
 
 [blacklist]
-words = ["nsfw", "nude", "naked", "pussy", "vagina", "dick", "cock", "penis", "loli", "shota", "child", "children", "sex", "fuck"]
+words = [
+	"nsfw",
+	"nude",
+	"naked",
+	"pussy",
+	"vagina",
+	"dick",
+	"cock",
+	"penis",
+	"loli",
+	"shota",
+	"child",
+	"children",
+	"sex",
+	"fuck",
+]
 files = ["word-blacklist.txt"]
