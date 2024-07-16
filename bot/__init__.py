@@ -1,5 +1,6 @@
 import contextlib
 from abc import ABC
+import datetime
 from typing import Iterable
 
 
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import discord
 from httpx import Timeout
+from httpx._client import DEFAULT_TIMEOUT_CONFIG
 import toml
 from discord import app_commands
 from discord.ext import commands
@@ -21,10 +23,8 @@ from gradio_client import Client
 from gradio_client import exceptions as gradio_exc
 from gradio_client import handle_file
 
-from httpx._client import DEFAULT_TIMEOUT_CONFIG
 # pylint: disable-next=unnecessary-dunder-call # need to re-init same obj
-DEFAULT_TIMEOUT_CONFIG.__init__(timeout=Timeout(20.0))
-
+DEFAULT_TIMEOUT_CONFIG.__init__(timeout=Timeout(200.0))
 
 
 class DFAWordBlacklist:
@@ -132,13 +132,13 @@ class AnimegenMemory:
             os.makedirs(self.memories_path)
         self.query_prompt = (
             prompts_path.joinpath("memory_query.txt")
-                .read_text().strip() + '\n')
+            .read_text().strip() + '\n')
         self.user_select_prompt = (
             prompts_path.joinpath("memory_select_user.txt")
-                .read_text().strip() + '\n')
+            .read_text().strip() + '\n')
         self.write_prompt = (
             prompts_path.joinpath("memory_write.txt")
-                .read_text().strip() + '\n')
+            .read_text().strip() + '\n')
 
     async def _message_client(self, message: str) -> str:
         return await asyncio.threads.to_thread(functools.partial(
@@ -171,6 +171,7 @@ class AnimegenMemory:
         return response
 
     async def save(self, info: str):
+        time = datetime.datetime.now()
         print(f'[MEMORY: SAVE] {info}')
         user_prompt = self.user_select_prompt.format_map(
             {"files": ', '.join(map(lambda x: x.stem,
@@ -189,28 +190,29 @@ class AnimegenMemory:
                     f'--- FILE CONTENTS FOR {file} ---\n'
                     + path.read_text() + '\n'
                     + f'--- END FILE CONTENTS FOR {file} ---\n')
-            write_prompt = self.write_prompt.format_map({"user": file})
+            write_prompt = self.write_prompt.format_map(
+                {"user": file, time: str(time)})
             response = await self._message_client(
                 f'{file_contents}{write_prompt}info: {info}')
             with path.open('wt') as f:
                 f.write(response)
 
 
-class Animegen(commands.Bot, ABC): # pylint: disable=design
+class Animegen(commands.Bot, ABC):  # pylint: disable=design
     IMAGE_EMBED_REGEX = r"\[\s*[image]{3,5}\s*:\s*([^\]]*)\s*\]"
     QUERY_REGEX = r'\[\s*query\s*\]'
     SAVE_MEM_REGEX = r"\[\s*save\s*:\s*([^\]]*)\s*\]"
     CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
 
-    def __init__(self, *args, config_path="config.toml", **options):
+    def __init__(self, root_path: Path = Path(__file__).parent,
+                 *args, **options):
         super().__init__(*args, **options)
-        root_path = Path(__file__).parent  # TODO: cwd?
         self.img_client = Client("Boboiazumi/animagine-xl-3.1")
         self.chat_client: Client | None = Client("Be-Bo/llama-3-chatbot_70b")
-        cfg_path = Path(config_path)
+        cfg_path = root_path.joinpath('config.toml')
         if not cfg_path.exists():
             print("MISSING CONFIG FILE, USING DEFAULT")
-            cfg_path = Path('config.default.toml')
+            cfg_path = root_path.joinpath('config.default.toml')
         self.config = toml.load(cfg_path)
 
         self._background_tasks = []
@@ -247,9 +249,9 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
         self.memory_handler = AnimegenMemory(prompts_path, self.memory_path)
 
         self.system_prompt = (prompts_path.joinpath("system.txt")
-                       .read_text(encoding='utf8').strip() + "\n")
+                              .read_text(encoding='utf8').strip() + "\n")
         self.reminder_prompt = (prompts_path.joinpath("reminder.txt")
-                         .read_text(encoding='utf8').strip() + "\n")
+                                .read_text(encoding='utf8').strip() + "\n")
         self.init_commands()
 
     def add_task(self, coro):
@@ -322,7 +324,7 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                 self.chat_client.predict,
                 message=message,
                 api_name="/chat"))
-        except Exception as e: # pylint: disable=broad-exception-caught
+        except Exception as e:  # pylint: disable=broad-exception-caught
             if 'debug' in self.general and self.general['debug']:
                 return f"```{e}```"
 
@@ -346,6 +348,7 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             message_str = await self.msg_as_str(message)
             # Generate the response
             response = await self.chat(message.channel, message_str)
+
             def save_mem(match: re.Match[str]) -> str:
                 asyncio.run_coroutine_threadsafe(
                     self.memory_handler.save(match.group(1)),
@@ -356,16 +359,16 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                 query_res = await self.memory_handler.query(
                     re.sub(self.QUERY_REGEX, '', response, 0, re.I))
                 response = re.sub(self.SAVE_MEM_REGEX, save_mem,
-                    await self.chat(
-                        message.channel,
-                        f'--- QUERY ---\n'
-                        f'NOTE, ONLY YOU CAN SEE THIS MESSAGE, DO NOT MENTION '
-                        f'THIS PROMPT UNDER ANY CIRCUMSTANCE\n'
-                        f'query: {response}\n'
-                        f'response: {query_res}\n'
-                        f'--- END QUERY ---\n'
-                        f'ORIGINAL MESSAGE: {message_str}'),
-                    0, re.IGNORECASE)
+                                  await self.chat(
+                                      message.channel,
+                                      f'--- QUERY ---\n'
+                                      f'NOTE, ONLY YOU CAN SEE THIS MESSAGE, DO NOT MENTION '
+                                      f'THIS PROMPT UNDER ANY CIRCUMSTANCE\n'
+                                      f'query: {response}\n'
+                                      f'response: {query_res}\n'
+                                      f'--- END QUERY ---\n'
+                                      f'ORIGINAL MESSAGE: {message_str}'),
+                                  0, re.IGNORECASE)
 
             response = self.blacklist.replace(response, '\\*')
             if 'debug' in self.general and self.general['debug']:
@@ -395,13 +398,13 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
         try:
             synced = await self.tree.sync()
             print(f"Synced {len(synced)} command(s)")
-        except Exception as e: # pylint: disable=broad-exception-caught
+        except Exception as e:  # pylint: disable=broad-exception-caught
             print(e)
 
     # pylint: disable-next=arguments-differ # pylint wrong typeinfo
     async def on_message(self, message: discord.Message, /):
         if (message.author.id in self.chat_participants
-            and self.chat_client is not None):
+                and self.chat_client is not None):
             # add to task queue
             self.add_task(self.handle_message(message))
 
@@ -422,7 +425,7 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             ", ", "`, `") + "`."
         if prompt:
             prompt = ("`" + prompt.replace(", ",
-                        ",").replace(",", "`, `") + "`, `")
+                                           ",").replace(",", "`, `") + "`, `")
         else:
             prompt = (
                 "`" + self.defaults["prompt"].replace(",", "`, `") + "`, ")
@@ -468,8 +471,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
     def embed_logs(self, title: str, desc: str, thumbnail: str | None = None):
         assert self.user is not None
         embedVar = discord.Embed(title=title,
-                                    description=desc,
-                                    color=0xf4e1cc)
+                                 description=desc,
+                                 color=0xf4e1cc)
 
         if thumbnail:
             embedVar.set_thumbnail(url=thumbnail)
@@ -478,7 +481,7 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                             icon_url=self.user.display_avatar)
         return embedVar
 
-    def init_commands(self): # pylint: disable=too-many-statements
+    def init_commands(self):  # pylint: disable=too-many-statements
         @self.tree.command(
             name="chat",
             description="Join, create or leave a conversation with Animegen")
@@ -693,11 +696,3 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             await interaction.response.send_message(
                 f'> User `@{member.display_name}` has been warned and added '
                 f'to the watchlist!')
-
-
-if __name__ == "__main__":
-    load_dotenv()
-    token = os.getenv('TOKEN')
-    assert token is not None
-    bot = Animegen(command_prefix="!", intents=discord.Intents.all())
-    bot.run(token)
