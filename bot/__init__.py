@@ -1,4 +1,3 @@
-# pylint: disable=basic
 import contextlib
 from abc import ABC
 from typing import Iterable

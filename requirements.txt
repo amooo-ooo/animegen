@@ -1,3 +1,6 @@
 discord
 gradio_client
 toml
+numpy
+opencv-python
+pyvirtualcam

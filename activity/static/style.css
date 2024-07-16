@@ -1,0 +1,22 @@
+img.stream {
+    max-height: 86vh;
+    max-width: calc(100vw - 2rem);
+    margin: auto;
+}
+
+div.container {
+    background-color: #222222;
+    overflow: auto;
+    height: 86vh;
+    display: flex;
+    margin: auto;
+    border-radius: .6rem;
+}
+
+body {
+    display: flex;
+    background-color: #1a1a1a;
+    margin: 0;
+    padding: 0;
+    height: 100vh;
+}
