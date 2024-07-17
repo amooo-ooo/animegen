@@ -1,6 +1,7 @@
 import contextlib
 from abc import ABC
 import datetime
+import itertools
 from typing import Iterable
 
 
@@ -18,7 +19,6 @@ from httpx._client import DEFAULT_TIMEOUT_CONFIG
 import toml
 from discord import app_commands
 from discord.ext import commands
-from dotenv import load_dotenv
 from gradio_client import Client
 from gradio_client import exceptions as gradio_exc
 from gradio_client import handle_file
@@ -187,7 +187,7 @@ class AnimegenMemory:
             file = self.memories_path.joinpath(file_name + '.txt')
             if file.exists():
                 file_content = f'--- MEMORIES ABOUT {file_name} ---\n'
-                file_content += file.read_text() + '\n'
+                file_content += file.read_text(encoding='utf8') + '\n'
                 file_content += f'--- END MEMORIES ABOUT {file_name} ---\n'
                 response = await self._message_client(
                     (f'--- LAST RESPONSE ---\n{response}\n'
@@ -206,9 +206,10 @@ class AnimegenMemory:
                     + message_str)
             if self.debug:
                 print(f'[MEMORY: QUERY RESPONSE from {file_name}] {response}')
-            read_queue.extend(map(
-                lambda match: match.group(1).lower().strip(),
-                re.finditer(self.READ_FILE_REGEX, response)))
+            read_queue.extend(itertools.chain(*map(
+                lambda match: map(str.strip,
+                                  match.group(1).lower().split(',')),
+                re.finditer(self.READ_FILE_REGEX, response))))
             response = re.sub(self.READ_FILE_REGEX, '', response)
         await self.queue_save(message_str)
         return None if re.search(self.MISSING_REGEX, message_str) else response
@@ -221,6 +222,8 @@ class AnimegenMemory:
 
     async def save(self):
         messages = ''
+        if not self._queued_to_save:
+            return
         for time, msg in self._queued_to_save:
             messages += f'[{time}] {msg}\n'
         self._queued_to_save.clear()
@@ -246,7 +249,7 @@ class AnimegenMemory:
                 {"user": file})
             response = await self._message_client(
                 f'{file_contents}{write_prompt}{messages}')
-            with path.open('wt') as f:
+            with path.open('wt', encoding='utf8') as f:
                 f.write(response)
 
 
@@ -290,6 +293,9 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
         self.params = self.config['command_params']
         self.defaults = self.config['defaults']
         self.debug = bool('debug' in self.general and self.general['debug'])
+        self.blacklist_channel_ids = (
+            set(self.general['blacklist_channel_ids'])
+            if 'blacklist_channel_ids' in self.general else ())
 
         self.watchlist = {}
 
@@ -476,8 +482,9 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
 
     # pylint: disable-next=arguments-differ # pylint wrong typeinfo
     async def on_message(self, message: discord.Message, /):
-        if (message.author.id in self.chat_participants
-                and self.chat_client is not None):
+        if (self.chat_client is not None
+                and message.channel.id not in self.blacklist_channel_ids
+                and message.author.id in self.chat_participants):
             # add to task queue
             self.add_task(self.handle_message(message))
 
