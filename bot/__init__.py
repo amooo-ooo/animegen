@@ -15,7 +15,7 @@ from pathlib import Path
 
 import discord
 from httpx import Timeout
-from httpx._client import DEFAULT_TIMEOUT_CONFIG
+from httpx._config import DEFAULT_TIMEOUT_CONFIG
 import toml
 from discord import app_commands
 from discord.ext import commands
