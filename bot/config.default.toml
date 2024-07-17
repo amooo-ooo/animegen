@@ -3,7 +3,8 @@ context_window = 10
 memory_window = 50
 verbose = false
 read_channel_history = 16
-prompts_dir = 'prompts'
+# prompts_dir = 'prompts'
+# debug = true
 
 [defaults]
 prompt = "frieren"
