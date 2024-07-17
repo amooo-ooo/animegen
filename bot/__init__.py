@@ -1,5 +1,7 @@
 import contextlib
 from abc import ABC
+import datetime
+import itertools
 from typing import Iterable
 
 
@@ -13,18 +15,16 @@ from pathlib import Path
 
 import discord
 from httpx import Timeout
+from httpx._config import DEFAULT_TIMEOUT_CONFIG
 import toml
 from discord import app_commands
 from discord.ext import commands
-from dotenv import load_dotenv
 from gradio_client import Client
 from gradio_client import exceptions as gradio_exc
 from gradio_client import handle_file
 
-from httpx._client import DEFAULT_TIMEOUT_CONFIG
 # pylint: disable-next=unnecessary-dunder-call # need to re-init same obj
-DEFAULT_TIMEOUT_CONFIG.__init__(timeout=Timeout(20.0))
-
+DEFAULT_TIMEOUT_CONFIG.__init__(timeout=Timeout(200.0))
 
 
 class DFAWordBlacklist:
@@ -122,95 +122,154 @@ class DFAWordBlacklist:
         return result
 
 
-class AnimegenMemory:
-    READ_FILE_REGEX = r"\[\s*read\s*:\s*([^\]]*)\s*\]"
+async def msg_as_str(msg: discord.Message):
+    replies = ''
+    if msg.reference is not None and msg.reference.message_id is not None:
+        reply_msg = await msg_as_str(
+            await msg.channel.fetch_message(msg.reference.message_id))
+        replies = f'[in response to: `{reply_msg}`]'
+    return (f"{replies}[{msg.created_at}] {msg.author.display_name}: "
+            f"{msg.clean_content}")
 
-    def __init__(self, prompts_path: Path, memories_path: Path):
+
+class AnimegenMemory:
+    READ_FILE_REGEX = re.compile(r"\[\s*read\s*:\s*([^\]]*)\s*\]", re.I)
+    MISSING_REGEX = re.compile(r'\[\s*none\s*\]', re.I)
+
+    def __init__(
+            self,
+            prompts_path: Path,
+            memories_path: Path,
+            debug: bool = False):
+        # should be initialized before use
+        self._event_loop: asyncio.AbstractEventLoop = None  # type: ignore
         self.client = Client("Be-Bo/llama-3-chatbot_70b")
         self.memories_path = memories_path
+        self.debug = debug
+        self._queued_to_save: list[tuple[datetime.datetime, str]] = []
         if not self.memories_path.exists():
             os.makedirs(self.memories_path)
         self.query_prompt = (
             prompts_path.joinpath("memory_query.txt")
-                .read_text().strip() + '\n')
+            .read_text().strip() + '\n')
         self.user_select_prompt = (
             prompts_path.joinpath("memory_select_user.txt")
-                .read_text().strip() + '\n')
+            .read_text().strip() + '\n')
         self.write_prompt = (
             prompts_path.joinpath("memory_write.txt")
-                .read_text().strip() + '\n')
+            .read_text().strip() + '\n')
 
     async def _message_client(self, message: str) -> str:
-        return await asyncio.threads.to_thread(functools.partial(
-            self.client.predict,
-            message=message,
-            api_name="/chat"
-        ))
+        try:
+            return await asyncio.threads.to_thread(functools.partial(
+                self.client.predict,
+                message=message,
+                api_name="/chat"
+            ))
+        except gradio_exc.AppError:
+            self.client = await asyncio.threads.to_thread(functools.partial(
+                Client, "Be-Bo/llama-3-chatbot_70b"))
+            return await self._message_client(message)
 
-    async def query(self, query: str):
-        print(f'[MEMORY: QUERY] {query}')
+    async def handle_message(self, message: discord.Message) -> str | None:
+        visited = set()
         query_prompt = self.query_prompt.format_map(
             {"files": ', '.join(map(lambda x: x.stem,
                                     self.memories_path.iterdir()))})
-        response = await self._message_client(
-            f'{query_prompt}query: {query}')
-        while match := re.search(self.READ_FILE_REGEX, response, re.I):
-            file_name = match.group(1).lower().strip()
+        message_str = await msg_as_str(message)
+        read_queue = [message.author.display_name.lower().strip()]
+        response = ''
+        while read_queue:
+            file_name = read_queue.pop()
+            if file_name in visited:
+                continue
+            visited.add(file_name)
             file = self.memories_path.joinpath(file_name + '.txt')
             if file.exists():
-                file_content = f'--- FILE {file_name} CONTENTS ---\n'
-                file_content += file.read_text() + '\n'
-                file_content += f'--- END FILE {file_name} CONTENTS ---\n'
+                file_content = f'--- MEMORIES ABOUT {file_name} ---\n'
+                file_content += file.read_text(encoding='utf8') + '\n'
+                file_content += f'--- END MEMORIES ABOUT {file_name} ---\n'
                 response = await self._message_client(
-                    f'{file_content}{query_prompt}query: {query}')
+                    (f'--- LAST RESPONSE ---\n{response}\n'
+                     f'--- END LAST RESPONSE ---\n'
+                     if response else '')
+                    + f'{file_content}'
+                    f'{query_prompt}'
+                    + message_str)
             else:
                 response = await self._message_client(
-                    f'--- FILE {file_name} DOES NOT EXIST ---\n'
-                    f'{query_prompt}query: {query}')
-        print(f'[MEMORY: QUERY RESPONSE] {response}')
-        return response
+                    (f'--- LAST RESPONSE ---\n{response}\n'
+                     f'--- END LAST RESPONSE ---\n'
+                     if response else '')
+                    + f'--- NO MEMORIES ABOUT {file_name} /---\n'
+                    f'{query_prompt}'
+                    + message_str)
+            if self.debug:
+                print(f'[MEMORY: QUERY RESPONSE from {file_name}] {response}')
+            read_queue.extend(itertools.chain(*map(
+                lambda match: map(str.strip,
+                                  match.group(1).lower().split(',')),
+                re.finditer(self.READ_FILE_REGEX, response))))
+            response = re.sub(self.READ_FILE_REGEX, '', response)
+        await self.queue_save(message_str)
+        return None if re.search(self.MISSING_REGEX, message_str) else response
 
-    async def save(self, info: str):
-        print(f'[MEMORY: SAVE] {info}')
+    async def queue_save(self, message: str):
+        time = datetime.datetime.now(datetime.UTC)
+        self._queued_to_save.append((time, message))
+        if len(self._queued_to_save) > 10:
+            self._event_loop.create_task(self.save())
+
+    async def save(self):
+        messages = ''
+        if not self._queued_to_save:
+            return
+        for time, msg in self._queued_to_save:
+            messages += f'[{time}] {msg}\n'
+        self._queued_to_save.clear()
         user_prompt = self.user_select_prompt.format_map(
             {"files": ', '.join(map(lambda x: x.stem,
                                     self.memories_path.iterdir()))})
         response = await self._message_client(
-            f'{user_prompt}info: {info}')
-        print(f'[MEMORY: SAVING TO] {response}')
+            f'{user_prompt}{messages}')
+        if self.debug:
+            print(f'[MEMORY: SAVING TO] {response}')
         for file in response.split(','):
             file = file.strip().lower()
             file_contents = ''
             path = self.memories_path.joinpath(file + '.txt')
             if not path.exists():
-                file_contents = f'--- CREATED FILE FOR USER {file} ---\n'
+                file_contents = f'--- CREATING MEMORIES ABOUT {file} /---\n'
             else:
                 file_contents = (
-                    f'--- FILE CONTENTS FOR {file} ---\n'
+                    f'--- CURRENT MEMORIES ABOUT {file} ---\n'
                     + path.read_text() + '\n'
-                    + f'--- END FILE CONTENTS FOR {file} ---\n')
-            write_prompt = self.write_prompt.format_map({"user": file})
+                    + f'--- END CURRENT MEMORIES ANOUT {file} ---\n')
+            write_prompt = self.write_prompt.format_map(
+                {"user": file})
             response = await self._message_client(
-                f'{file_contents}{write_prompt}info: {info}')
-            with path.open('wt') as f:
+                f'{file_contents}{write_prompt}{messages}')
+            with path.open('wt', encoding='utf8') as f:
                 f.write(response)
 
 
-class Animegen(commands.Bot, ABC): # pylint: disable=design
-    IMAGE_EMBED_REGEX = r"\[\s*[image]{3,5}\s*:\s*([^\]]*)\s*\]"
-    QUERY_REGEX = r'\[\s*query\s*\]'
-    SAVE_MEM_REGEX = r"\[\s*save\s*:\s*([^\]]*)\s*\]"
+class Animegen(commands.Bot, ABC):  # pylint: disable=design
+    IMAGE_EMBED_REGEX = re.compile(
+        r"\[\s*[image]{3,5}\s*:\s*([^\]]*)\s*\]", re.I)
+    QUERY_REGEX = re.compile(r'\[\s*query\s*\]', re.I)
+    SAVE_MEM_REGEX = re.compile(r"\[\s*save\s*:\s*([^\]]*)\s*\]", re.I)
     CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
+    NAME = 'astolfo'
 
-    def __init__(self, *args, config_path="config.toml", **options):
+    def __init__(self, root_path: Path = Path(__file__).parent,
+                 *args, **options):
         super().__init__(*args, **options)
-        root_path = Path(__file__).parent  # TODO: cwd?
         self.img_client = Client("Boboiazumi/animagine-xl-3.1")
         self.chat_client: Client | None = Client("Be-Bo/llama-3-chatbot_70b")
-        cfg_path = Path(config_path)
+        cfg_path = root_path.joinpath('config.toml')
         if not cfg_path.exists():
             print("MISSING CONFIG FILE, USING DEFAULT")
-            cfg_path = Path('config.default.toml')
+            cfg_path = root_path.joinpath('config.default.toml')
         self.config = toml.load(cfg_path)
 
         self._background_tasks = []
@@ -233,6 +292,10 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
         self.general = self.config["general"]
         self.params = self.config['command_params']
         self.defaults = self.config['defaults']
+        self.debug = bool('debug' in self.general and self.general['debug'])
+        self.blacklist_channel_ids = (
+            set(self.general['blacklist_channel_ids'])
+            if 'blacklist_channel_ids' in self.general else ())
 
         self.watchlist = {}
 
@@ -242,15 +305,27 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
         self.user_memories = set(os.listdir(self.memory_path))
 
         prompts_path = root_path.joinpath(
-            self.general["prompts"]
-            if 'prompts' in self.general else 'prompts')
-        self.memory_handler = AnimegenMemory(prompts_path, self.memory_path)
+            self.general['prompts_dir']
+            if 'prompts_dir' in self.general else 'prompts')
+        self.memory_handler = AnimegenMemory(
+            prompts_path,
+            self.memory_path,
+            debug=self.debug)
 
         self.system_prompt = (prompts_path.joinpath("system.txt")
-                       .read_text(encoding='utf8').strip() + "\n")
+                              .read_text(encoding='utf8').strip() + "\n")
         self.reminder_prompt = (prompts_path.joinpath("reminder.txt")
-                         .read_text(encoding='utf8').strip() + "\n")
-        self.init_commands()
+                                .read_text(encoding='utf8').strip() + "\n")
+
+        if 'debug_guilds' in self.general:
+            self.init_commands(debug_guilds=self.general['debug_guilds'])
+        else:
+            self.init_commands()
+
+    async def setup_hook(self) -> None:
+        # pylint: disable-next=protected-access
+        self.memory_handler._event_loop = self.loop
+        return await super().setup_hook()
 
     def add_task(self, coro):
         task = asyncio.create_task(coro)
@@ -292,15 +367,6 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
         path = image[0]["image"]
         return path
 
-    async def msg_as_str(self, msg: discord.Message):
-        replies = ''
-        if msg.reference is not None and msg.reference.message_id is not None:
-            reply_msg = await self.msg_as_str(
-                await msg.channel.fetch_message(msg.reference.message_id))
-            replies = f'[in response to: `{reply_msg}`]'
-        return (f"{replies}[{msg.created_at}] {msg.author.display_name}: "
-                f"{msg.clean_content}")
-
     async def chat(self, channel: discord.abc.Messageable, message: str):
         assert self.chat_client is not None
         if self.counter == 0:
@@ -309,10 +375,11 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                     and int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])):
                 length = int(self.general[self.CONFIG_READ_CHANNEL_HISTORY])
                 async for old_msg in channel.history(limit=length):
-                    history = f'{await self.msg_as_str(old_msg)}\n{history}'
+                    history = f'{await msg_as_str(old_msg)}\n{history}'
                 history = (f'\n--- CHANNEL HISTORY ---\n'
                            f'{history}--- END CHANNEL HISTORY ---\n')
-                print(history)
+                if self.debug:
+                    print(history)
             message = self.system_prompt + history + message
         elif (self.counter % self.general["context_window"]) == 0:
             message = self.reminder_prompt + message
@@ -322,19 +389,25 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                 self.chat_client.predict,
                 message=message,
                 api_name="/chat"))
-        except Exception as e: # pylint: disable=broad-exception-caught
-            if 'debug' in self.general and self.general['debug']:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            if self.debug:
                 return f"```{e}```"
 
         return result
 
     @contextlib.asynccontextmanager
-    async def gen_image(self, prompt):
+    async def gen_image(
+            self, prompt,
+            typing_channel: discord.abc.Messageable | None = None):
         try:
-            path = await self.generate(prompt)
+            if typing_channel is not None:
+                async with typing_channel.typing():
+                    path = Path(await self.generate(prompt))
+            else:
+                path = Path(await self.generate(prompt))
             try:
-                with open(path, 'rb') as f:
-                    yield discord.File(f)
+                with path.open('rb') as f:
+                    yield discord.File(f, filename=path.name)
             finally:
                 os.remove(path)
         except gradio_exc.AppError as e:
@@ -343,77 +416,80 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
     async def handle_message(self, message: discord.Message):
         # Defer the response
         async with message.channel.typing():
-            message_str = await self.msg_as_str(message)
+            memory_ctx = await self.memory_handler.handle_message(message)
+            message_str = (
+                (f'--- LONG TERM MEMORY ---\n{memory_ctx}\n'
+                 f'--- END LONG TERM MEMORY ---\n'
+                    if memory_ctx is not None else '')
+                + await msg_as_str(message))
             # Generate the response
             response = await self.chat(message.channel, message_str)
-            def save_mem(match: re.Match[str]) -> str:
-                asyncio.run_coroutine_threadsafe(
-                    self.memory_handler.save(match.group(1)),
-                    self.loop)
-                return ''
-            response = re.sub(self.SAVE_MEM_REGEX, save_mem, response, 0, re.I)
-            while re.search(self.QUERY_REGEX, response, re.I):
-                query_res = await self.memory_handler.query(
-                    re.sub(self.QUERY_REGEX, '', response, 0, re.I))
-                response = re.sub(self.SAVE_MEM_REGEX, save_mem,
-                    await self.chat(
-                        message.channel,
-                        f'--- QUERY ---\n'
-                        f'NOTE, ONLY YOU CAN SEE THIS MESSAGE, DO NOT MENTION '
-                        f'THIS PROMPT UNDER ANY CIRCUMSTANCE\n'
-                        f'query: {response}\n'
-                        f'response: {query_res}\n'
-                        f'--- END QUERY ---\n'
-                        f'ORIGINAL MESSAGE: {message_str}'),
-                    0, re.IGNORECASE)
-
             response = self.blacklist.replace(response, '\\*')
-            if 'debug' in self.general and self.general['debug']:
-                print(response)
+        if self.debug:
+            print(response)
 
-            if match := re.search(self.IMAGE_EMBED_REGEX, response, re.I):
-                async with self.gen_image(match.group(1)) as img:
-                    text_msg = re.sub(self.IMAGE_EMBED_REGEX, '',
-                                      response, 0, re.IGNORECASE)
+        matches = re.split(self.IMAGE_EMBED_REGEX, response, re.I)
+        image_gen_failed = False
+        last_message = None
+        for i, msg in enumerate(matches):
+            if not msg.strip():
+                continue
+            if (i % 2) == 1:  # Image prompt
+                if image_gen_failed:
+                    continue
+                async with self.gen_image(
+                        msg, typing_channel=message.channel) as img:
                     if isinstance(img, Exception):
-                        response = self.blacklist.replace(
-                            await self.chat(
-                                message.channel,
-                                f'dev: [image generation failed with error: '
-                                f'"{img}". ur original msg was "{text_msg}". '
-                                f'please send a followup message (please note '
-                                f'images will not work in your followup)]'),
-                            '\\*')
+                        async with message.channel.typing():
+                            response = self.blacklist.replace(
+                                await self.chat(
+                                    message.channel,
+                                    f'dev: [image generation failed with error: '
+                                    f'"{img}". '
+                                    f'please send a followup message including '
+                                    f'quota time till reset if available (please '
+                                    f'note images will not work in followup)]'),
+                                '\\*')
                         await message.channel.send(response)
+                        await self.memory_handler.queue_save(
+                            f'{self.NAME}: {response}')
+                        image_gen_failed = True
                     else:
-                        await message.channel.send(text_msg, file=img)
+                        # loop iterations, last_message always set
+                        assert last_message is not None
+                        await last_message.add_files(img)
+                        await self.memory_handler.queue_save(
+                            f'{self.NAME}: [image: {msg}]')
             else:
-                await message.channel.send(response)
+                last_message = await message.channel.send(msg)
+                await self.memory_handler.queue_save(
+                    f'{self.NAME}: {response}')
 
     async def on_ready(self):
         print(f'{self.user} is cooking!!')
         try:
-            synced = await self.tree.sync()
-            print(f"Synced {len(synced)} command(s)")
-        except Exception as e: # pylint: disable=broad-exception-caught
+            if 'debug_guilds' in self.general:
+                await self.tree.sync()
+                for id in self.general['debug_guilds']:
+                    guild = self.get_guild(id)
+                    synced = await self.tree.sync(guild=guild)
+                    print(f"Synced {len(synced)} command(s) to {guild}")
+            else:
+                synced = await self.tree.sync()
+                print(f"Synced {len(synced)} command(s)")
+        except Exception as e:  # pylint: disable=broad-exception-caught
             print(e)
 
     # pylint: disable-next=arguments-differ # pylint wrong typeinfo
     async def on_message(self, message: discord.Message, /):
-        if (message.author.id in self.chat_participants
-            and self.chat_client is not None):
+        if (self.chat_client is not None
+                and message.channel.id not in self.blacklist_channel_ids
+                and message.author.id in self.chat_participants):
             # add to task queue
             self.add_task(self.handle_message(message))
 
-    async def on_user_leave(self, channel: discord.abc.Messageable, user: str):
-        await self.memory_handler.save(
-            await self.chat(
-                channel,
-                f'dev: [the user {user} is leaving the chat! this is your last'
-                f' chance to save any information about them! respond with '
-                f'*any* important memories to remember about them! your '
-                f'response is sent directly to memory, as if using [save]]')
-        )
+    async def on_user_leave(self, _channel: discord.abc.Messageable, _user: str):
+        await self.memory_handler.save()
 
     def split_image_prompt(self, prompt: str, negative_prompt: str):
         PROMPT = self.params["additional_prompt"].replace(
@@ -422,7 +498,7 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             ", ", "`, `") + "`."
         if prompt:
             prompt = ("`" + prompt.replace(", ",
-                        ",").replace(",", "`, `") + "`, `")
+                                           ",").replace(",", "`, `") + "`, `")
         else:
             prompt = (
                 "`" + self.defaults["prompt"].replace(",", "`, `") + "`, ")
@@ -468,8 +544,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
     def embed_logs(self, title: str, desc: str, thumbnail: str | None = None):
         assert self.user is not None
         embedVar = discord.Embed(title=title,
-                                    description=desc,
-                                    color=0xf4e1cc)
+                                 description=desc,
+                                 color=0xf4e1cc)
 
         if thumbnail:
             embedVar.set_thumbnail(url=thumbnail)
@@ -478,22 +554,29 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                             icon_url=self.user.display_avatar)
         return embedVar
 
-    def init_commands(self): # pylint: disable=too-many-statements
+    def init_commands(self, debug_guilds: list[int] | None = None):
+        kwargs = {}
+        if debug_guilds is not None:
+            kwargs['guilds'] = list(map(
+                # Cannot use self.get_guild, not ready yet!
+                lambda id: discord.Object(id, type=discord.Guild),
+                debug_guilds))
         @self.tree.command(
             name="chat",
-            description="Join, create or leave a conversation with Animegen")
+            description="Join, create or leave a conversation with Animegen",
+            **kwargs)
         async def chat(interaction: discord.Interaction):
             assert isinstance(interaction.channel, discord.abc.Messageable)
             if interaction.user.id not in self.chat_participants:
                 self.chat_participants.append(interaction.user.id)
                 await interaction.response.send_message(
-                    f"`@{interaction.user.display_name}` has joined the "
-                    f"conversation!")
+                    f"{interaction.user.mention} has joined the conversation!",
+                    allowed_mentions=discord.AllowedMentions(users=False))
             else:
                 self.chat_participants.remove(interaction.user.id)
                 await interaction.response.send_message(
-                    f"`@{interaction.user.display_name}` has left the "
-                    f"conversation!")
+                    f"{interaction.user.mention} has left the conversation!",
+                    allowed_mentions=discord.AllowedMentions(users=False))
                 await self.on_user_leave(
                     interaction.channel,
                     interaction.user.display_name)
@@ -508,7 +591,23 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                         functools.partial(
                             Client, "Be-Bo/llama-3-chatbot_70b"))
 
-        @self.tree.command(name="imagine", description="Generate an image")
+        @self.tree.command(
+            name="whoschatting",
+            description="List users in the current conversation with Animegen",
+            **kwargs)
+        async def whoschatting(interaction: discord.Interaction):
+            users = ', '.join(map(
+                lambda id: f'<@{id}>',
+                self.chat_participants))
+            await interaction.response.send_message(
+                f'these users are currently chatting with me! :D {users}'
+                if users else 'noone wants to talk with me at the moment :(',
+                allowed_mentions=discord.AllowedMentions(users=False))
+
+        @self.tree.command(
+            name="imagine",
+            description="Generate an image",
+            **kwargs)
         @app_commands.describe(
             prompt="Tags for generating the image",
             negative_prompt="Penalty tags for generating the image",
@@ -573,12 +672,15 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
                     negative_prompt,
                     **kwargs)
 
-                path = await self.generate(prompt, negative_prompt, **kwargs)
+                path = Path(await self.generate(
+                    prompt,
+                    negative_prompt,
+                    **kwargs))
 
-                with open(path, 'rb') as f:
+                with path.open('rb') as f:
                     await interaction.followup.send(
                         embed=embed_log,
-                        file=discord.File(f))
+                        file=discord.File(f, filename=path.name))
 
                 os.remove(path)
             except gradio_exc.AppError as e:
@@ -593,7 +695,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
         @app_commands.default_permissions(kick_members=True)
         @self.tree.command(
             name="kick",
-            description="Kick a user from the Discord server.", )
+            description="Kick a user from the Discord server.",
+            **kwargs)
         @app_commands.describe(
             member="Discord user",
             reason="Reason why")
@@ -609,7 +712,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             ban_members=True)
         @self.tree.command(
             name="ban",
-            description="Ban a user from the Discord server.")
+            description="Ban a user from the Discord server.",
+            **kwargs)
         @app_commands.describe(
             member="Discord user",
             reason="Reason why")
@@ -625,7 +729,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             ban_members=True)
         @self.tree.command(
             name="unban",
-            description="Unban a user from the Discord server.")
+            description="Unban a user from the Discord server.",
+            **kwargs)
         @app_commands.describe(user_id="ID of the user to unban")
         async def unban(interaction: discord.Interaction, user_id: int):
             assert interaction.guild is not None
@@ -640,7 +745,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             mute_members=True)
         @self.tree.command(
             name="mute",
-            description="Mute a user's messages.")
+            description="Mute a user's messages.",
+            **kwargs)
         @app_commands.describe(
             member="Discord user",
             reason="Reason why",
@@ -664,7 +770,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             mute_members=True)
         @self.tree.command(
             name="unmute",
-            description="Unmute a user's messages.")
+            description="Unmute a user's messages.",
+            **kwargs)
         @app_commands.describe(member="Discord user")
         async def unmute(interaction, member: discord.Member):
             await member.edit(timed_out_until=None)
@@ -680,7 +787,8 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             moderate_members=True)
         @self.tree.command(
             name="warn",
-            description="Warn a user and add them to the watchlist.")
+            description="Warn a user and add them to the watchlist.",
+            **kwargs)
         @app_commands.describe(
             member="Discord user",
             reason="Reason why")
@@ -693,11 +801,3 @@ class Animegen(commands.Bot, ABC): # pylint: disable=design
             await interaction.response.send_message(
                 f'> User `@{member.display_name}` has been warned and added '
                 f'to the watchlist!')
-
-
-if __name__ == "__main__":
-    load_dotenv()
-    token = os.getenv('TOKEN')
-    assert token is not None
-    bot = Animegen(command_prefix="!", intents=discord.Intents.all())
-    bot.run(token)
