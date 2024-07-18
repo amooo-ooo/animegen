@@ -178,7 +178,7 @@ class AnimegenMemory:
                                     self.memories_path.iterdir()))})
         message_str = await msg_as_str(message)
         read_queue = [message.author.display_name.lower().strip()]
-        response = ''
+        final_response = ''
         while read_queue:
             file_name = read_queue.pop()
             if file_name in visited:
@@ -190,29 +190,23 @@ class AnimegenMemory:
                 file_content += file.read_text(encoding='utf8') + '\n'
                 file_content += f'--- END MEMORIES ABOUT {file_name} ---\n'
                 response = await self._message_client(
-                    (f'--- LAST RESPONSE ---\n{response}\n'
-                     f'--- END LAST RESPONSE ---\n'
-                     if response else '')
-                    + f'{file_content}'
-                    f'{query_prompt}'
-                    + message_str)
+                    f'{file_content}{query_prompt}{message_str}')
             else:
                 response = await self._message_client(
-                    (f'--- LAST RESPONSE ---\n{response}\n'
-                     f'--- END LAST RESPONSE ---\n'
-                     if response else '')
-                    + f'--- NO MEMORIES ABOUT {file_name} /---\n'
-                    f'{query_prompt}'
-                    + message_str)
+                    f'--- NO MEMORIES ABOUT {file_name} /---\n'
+                    f'{query_prompt}{message_str}')
             if self.debug:
                 print(f'[MEMORY: QUERY RESPONSE from {file_name}] {response}')
             read_queue.extend(itertools.chain(*map(
                 lambda match: map(str.strip,
                                   match.group(1).lower().split(',')),
                 re.finditer(self.READ_FILE_REGEX, response))))
-            response = re.sub(self.READ_FILE_REGEX, '', response)
+            if not re.search(self.MISSING_REGEX, response):
+                final_response += (
+                    f'[memories about {file_name}] '
+                    f'{re.sub(self.READ_FILE_REGEX, "", response)}\n')
         await self.queue_save(message_str)
-        return None if re.search(self.MISSING_REGEX, message_str) else response
+        return None if not final_response else final_response
 
     async def queue_save(self, message: str):
         time = datetime.datetime.now(datetime.UTC)
@@ -418,7 +412,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
         async with message.channel.typing():
             memory_ctx = await self.memory_handler.handle_message(message)
             message_str = (
-                (f'--- LONG TERM MEMORY ---\n{memory_ctx}\n'
+                (f'--- LONG TERM MEMORY ---\n'
+                 f'NOTE ONLY YOU CAN SEE THIS\n{memory_ctx}'
                  f'--- END LONG TERM MEMORY ---\n'
                     if memory_ctx is not None else '')
                 + await msg_as_str(message))
@@ -441,14 +436,13 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                         msg, typing_channel=message.channel) as img:
                     if isinstance(img, Exception):
                         async with message.channel.typing():
-                            response = self.blacklist.replace(
-                                await self.chat(
-                                    message.channel,
-                                    f'dev: [image generation failed with error: '
-                                    f'"{img}". '
-                                    f'please send a followup message including '
-                                    f'quota time till reset if available (please '
-                                    f'note images will not work in followup)]'),
+                            response = self.blacklist.replace(await self.chat(
+                                message.channel,
+                                f'dev: [image generation failed with error: '
+                                f'"{img}". '
+                                f'please send a followup message including '
+                                f'quota time till reset if available (please '
+                                f'note images will not work in followup)]'),
                                 '\\*')
                         await message.channel.send(response)
                         await self.memory_handler.queue_save(
