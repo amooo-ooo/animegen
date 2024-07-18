@@ -2,7 +2,7 @@ import contextlib
 from abc import ABC
 import datetime
 import itertools
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 import asyncio
@@ -332,6 +332,9 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             self,
             prompt: str = "frieren",
             negative_prompt: str = "",
+            base_image: str | discord.Attachment
+        = 'https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png',
+            use_base_image: bool = False,
             **kwargs: dict):
 
         image, _details = await asyncio.threads.to_thread(functools.partial(
@@ -352,9 +355,13 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 "style_selector", self.defaults["style_selector"]),
             quality_selector=kwargs.get(
                 "quality_selector", self.defaults["quality_selector"]),
+            isImg2Img=use_base_image,
             img_path=handle_file(
-                'https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png'),
-            img2img_strength=0.65,
+                base_image.url
+                if isinstance(base_image, discord.Attachment) else
+                base_image),
+            img2img_strength=kwargs.get(
+                "base_image_strength", 0.65),
             api_name="/run"
         ))
 
@@ -535,7 +542,13 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             value=negative_prompt,
             inline=False)
 
+        if 'use_base_image' in kwargs and kwargs['use_base_image']:
+            assert isinstance(kwargs['base_image'], discord.Attachment)
+            embedVar.set_image(url=kwargs['base_image'].url)
+
         for title, value in kwargs.items():
+            if title in ('use_base_image', 'base_image'):
+                continue
             embedVar.add_field(
                 name=title.title(),
                 value=value,
@@ -621,7 +634,9 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             width="Custom width",
             height='Custom height',
             quality_selector=str(self.params['quality_selectors']),
-            style_selector=str(self.params['style_selectors'])
+            style_selector=str(self.params['style_selectors']),
+            base_image="Image to base generation off of",
+            base_image_strength="Strength of base image"
         )
         async def imagine(
                 interaction: discord.Interaction,
@@ -635,7 +650,9 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                     self.defaults['aspect_ratio'].split(" x ")[1]),
                 quality_selector: str = self.defaults['quality_selector'],
                 style_selector: str = self.defaults['style_selector'],
-                seed: int = -1):
+                seed: int = -1,
+                base_image: Optional[discord.Attachment] = None,
+                base_image_strength: float = 0.65):
 
             prompt = self.blacklist.replace(prompt, '')
 
@@ -668,6 +685,11 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 'style_selector': style_selector,
                 'quality_selector': quality_selector
             }
+
+            if base_image is not None:
+                kwargs['use_base_image'] = True
+                kwargs['base_image'] = base_image
+                kwargs['base_image_strength'] = base_image_strength
 
             try:
                 embed_log = self.embed_image(
