@@ -510,10 +510,10 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
         negative_prompt += ', ' + self.params["additional_negative_prompt"]
         prompt = ', '.join(map(
             lambda tag: f'`{tag}`',
-            re.split(self.COMMA_SEPERATOR_REGEX, prompt)))
+            re.split(self.COMMA_SEPERATOR_REGEX, prompt.strip(', '))))
         negative_prompt = ', '.join(map(
             lambda tag: f'`{tag}`',
-            re.split(self.COMMA_SEPERATOR_REGEX, negative_prompt)))
+            re.split(self.COMMA_SEPERATOR_REGEX, negative_prompt.strip(', '))))
         return (prompt + '.', negative_prompt + '.')
 
     def embed_image(self, user, prompt: str, negative_prompt: str, **kwargs):
