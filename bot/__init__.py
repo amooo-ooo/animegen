@@ -459,7 +459,7 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                     else:
                         # loop iterations, last_message always set
                         assert last_message is not None
-                        await last_message.add_files(img)
+                        last_message = await last_message.add_files(img)
                         await self.memory_handler.queue_save(
                             f'{self.NAME}: [image: {msg}]')
             else:
