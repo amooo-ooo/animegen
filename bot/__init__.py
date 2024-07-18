@@ -498,27 +498,23 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             self.add_task(self.handle_message(message))
 
     async def on_user_leave(self, _channel: discord.abc.Messageable, _user: str):
-        await self.memory_handler.save()
+        pass
 
+    COMMA_SEPERATOR_REGEX = re.compile(r',\s*')
     def split_image_prompt(self, prompt: str, negative_prompt: str):
-        PROMPT = self.params["additional_prompt"].replace(
-            ", ", "`, `") + "`."
-        NEGATIVE_PROMPT = self.params["additional_negative_prompt"].replace(
-            ", ", "`, `") + "`."
-        if prompt:
-            prompt = ("`" + prompt.replace(", ",
-                                           ",").replace(",", "`, `") + "`, `")
-        else:
-            prompt = (
-                "`" + self.defaults["prompt"].replace(",", "`, `") + "`, ")
-
-        if negative_prompt:
-            negative_prompt = ("`" + negative_prompt.replace(", ", ",")
-                               .replace(",", "`, `") + "`, `")
-        elif self.defaults["negative_prompt"] != '':
-            negative_prompt = ("`" + self.defaults["negative_prompt"]
-                               .replace(",", "`, `") + "`, `")
-        return (prompt + PROMPT, negative_prompt + NEGATIVE_PROMPT)
+        if not prompt:
+            prompt = self.defaults["prompt"]
+        if not negative_prompt:
+            negative_prompt = self.defaults["negative_prompt"]
+        prompt += ', ' + self.params["additional_prompt"]
+        negative_prompt += ', ' + self.params["additional_negative_prompt"]
+        prompt = ', '.join(map(
+            lambda tag: f'`{tag}`',
+            re.split(self.COMMA_SEPERATOR_REGEX, prompt)))
+        negative_prompt = ', '.join(map(
+            lambda tag: f'`{tag}`',
+            re.split(self.COMMA_SEPERATOR_REGEX, negative_prompt)))
+        return (prompt + '.', negative_prompt + '.')
 
     def embed_image(self, user, prompt: str, negative_prompt: str, **kwargs):
         assert self.user is not None
@@ -550,7 +546,7 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             if title in ('use_base_image', 'base_image'):
                 continue
             embedVar.add_field(
-                name=title.title(),
+                name=title.title().replace('_', ' '),
                 value=value,
                 inline=True)
 
@@ -580,33 +576,32 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             name="chat",
             description="Join, create or leave a conversation with Animegen",
             **kwargs)
-        async def chat(interaction: discord.Interaction):
-            assert isinstance(interaction.channel, discord.abc.Messageable)
-            if interaction.user.id not in self.chat_participants:
-                self.chat_participants.append(interaction.user.id)
-                await interaction.response.send_message(
-                    f"{interaction.user.mention} has joined the conversation!",
-                    allowed_mentions=discord.AllowedMentions(users=False))
+        async def chat(ctx: discord.Interaction):
+            assert isinstance(ctx.channel, discord.abc.Messageable)
+            msg = ''
+            if ctx.user.id not in self.chat_participants:
+                self.chat_participants.append(ctx.user.id)
+                msg = f"{ctx.user.mention} has joined the conversation!"
             else:
-                self.chat_participants.remove(interaction.user.id)
-                await interaction.response.send_message(
-                    f"{interaction.user.mention} has left the conversation!",
-                    allowed_mentions=discord.AllowedMentions(users=False))
-                await self.on_user_leave(
-                    interaction.channel,
-                    interaction.user.display_name)
-                # await instance.save_memory(interaction.user.display_name)
+                self.chat_participants.remove(ctx.user.id)
+                msg = f"{ctx.user.mention} has left the conversation!"
+                await self.on_user_leave(ctx.channel, ctx.user.display_name)
 
             if not self.chat_participants:  # refresh
                 self.chat_client = None
                 self.counter = 0
                 for task in self._background_tasks:
                     task.cancel()
+                await ctx.response.defer()
+                await self.memory_handler.save()
             if self.chat_participants and self.chat_client is None:
-                async with interaction.channel.typing():
-                    self.chat_client = await asyncio.to_thread(
-                        functools.partial(
-                            Client, "Be-Bo/llama-3-chatbot_70b"))
+                await ctx.response.defer()
+                self.chat_client = await asyncio.to_thread(
+                    functools.partial(
+                        Client, "Be-Bo/llama-3-chatbot_70b"))
+            await ctx.response.send_message(
+                msg,
+                allowed_mentions=discord.AllowedMentions(users=False))
 
         @self.tree.command(
             name="whoschatting",
@@ -628,28 +623,41 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
         @app_commands.describe(
             prompt="Tags for generating the image",
             negative_prompt="Penalty tags for generating the image",
-            sampler=str(self.params['samplers']),
+            sampler="The sampler to use for generation",
             seed="Seed for generating the image",
             steps="Inference steps for generating the image",
             width="Custom width",
             height='Custom height',
-            quality_selector=str(self.params['quality_selectors']),
-            style_selector=str(self.params['style_selectors']),
+            quality="The quality of image to generate",
+            style="The style of image to generate",
             base_image="Image to base generation off of",
             base_image_strength="Strength of base image"
+        )
+        @app_commands.choices(
+            sampler=list(map(
+                lambda s: app_commands.Choice(name=s, value=s),
+                self.params['samplers'])),
+            quality=list(map(
+                lambda s: app_commands.Choice(name=s, value=s),
+                self.params['quality_selectors'])),
+            style=list(map(
+                lambda s: app_commands.Choice(name=s, value=s),
+                self.params['style_selectors']))
         )
         async def imagine(
                 interaction: discord.Interaction,
                 prompt: str = self.defaults['prompt'],
                 negative_prompt: str = self.defaults['negative_prompt'],
-                sampler: str = self.defaults['sampler'],
+                sampler: app_commands.Choice[str] = self.defaults['sampler'],
                 steps: int = self.defaults['steps'],
                 width: int = int(
                     self.defaults['aspect_ratio'].split(" x ")[0]),
                 height: int = int(
                     self.defaults['aspect_ratio'].split(" x ")[1]),
-                quality_selector: str = self.defaults['quality_selector'],
-                style_selector: str = self.defaults['style_selector'],
+                quality: app_commands.Choice[str]
+            = self.defaults['quality_selector'],
+                style: app_commands.Choice[str]
+            = self.defaults['style_selector'],
                 seed: int = -1,
                 base_image: Optional[discord.Attachment] = None,
                 base_image_strength: float = 0.65):
@@ -659,11 +667,11 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             if sampler not in self.params['samplers']:
                 sampler = self.defaults['sampler']
 
-            if quality_selector not in self.params['quality_selectors']:
-                quality_selector = self.defaults['quality_selector']
+            if quality not in self.params['quality_selectors']:
+                quality = self.defaults['quality_selector']
 
-            if style_selector not in self.params['style_selectors']:
-                style_selector = self.defaults['style_selector']
+            if style not in self.params['style_selectors']:
+                style = self.defaults['style_selector']
 
             if 0 > seed or seed > 2147483647:
                 seed = random.randint(0, 2147483647)
@@ -682,8 +690,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 'sampler': sampler,
                 'aspect_ratio': f"{width} x {height}",
                 'steps': steps,
-                'style_selector': style_selector,
-                'quality_selector': quality_selector
+                'style_selector': style,
+                'quality_selector': quality
             }
 
             if base_image is not None:
