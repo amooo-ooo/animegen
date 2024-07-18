@@ -266,7 +266,7 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             cfg_path = root_path.joinpath('config.default.toml')
         self.config = toml.load(cfg_path)
 
-        self._background_tasks = []
+        self._background_tasks: list[asyncio.Task] = []
 
         self.blacklist = DFAWordBlacklist()
         if 'words' in self.config['blacklist']:
@@ -361,6 +361,13 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
         path = image[0]["image"]
         return path
 
+    async def reload_chat_client(self, channel: discord.abc.Messageable):
+        async with channel.typing():
+            self.chat_client = await asyncio.threads.to_thread(
+                functools.partial(
+                    Client,
+                    "Be-Bo/llama-3-chatbot_70b"))
+
     async def chat(self, channel: discord.abc.Messageable, message: str):
         assert self.chat_client is not None
         if self.counter == 0:
@@ -384,8 +391,9 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 message=message,
                 api_name="/chat"))
         except Exception as e:  # pylint: disable=broad-exception-caught
+            self.loop.create_task(self.reload_chat_client(channel))
             if self.debug:
-                return f"```{e}```"
+                return f"```{e}```\nreloading chat client, please wait!"
 
         return result
 
@@ -579,6 +587,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             if not self.chat_participants:  # refresh
                 self.chat_client = None
                 self.counter = 0
+                for task in self._background_tasks:
+                    task.cancel()
             if self.chat_participants and self.chat_client is None:
                 async with interaction.channel.typing():
                     self.chat_client = await asyncio.to_thread(
