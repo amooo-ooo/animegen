@@ -135,6 +135,7 @@ async def msg_as_str(msg: discord.Message):
 class AnimegenMemory:
     READ_FILE_REGEX = re.compile(r"\[\s*read\s*:\s*([^\]]*)\s*\]", re.I)
     MISSING_REGEX = re.compile(r'\[\s*none\s*\]', re.I)
+    LANGUAGE_MODEL = 'Be-Bo/llama-3-chatbot_70b'
 
     def __init__(
             self,
@@ -143,7 +144,7 @@ class AnimegenMemory:
             debug: bool = False):
         # should be initialized before use
         self._event_loop: asyncio.AbstractEventLoop = None  # type: ignore
-        self.client = Client("Be-Bo/llama-3-chatbot_70b")
+        self.client = Client(AnimegenMemory.LANGUAGE_MODEL)
         self.memories_path = memories_path
         self.debug = debug
         self._queued_to_save: list[tuple[datetime.datetime, str]] = []
@@ -168,7 +169,7 @@ class AnimegenMemory:
             ))
         except gradio_exc.AppError:
             self.client = await asyncio.threads.to_thread(functools.partial(
-                Client, "Be-Bo/llama-3-chatbot_70b"))
+                Client, AnimegenMemory.LANGUAGE_MODEL))
             return await self._message_client(message)
 
     async def handle_message(self, message: discord.Message) -> str | None:
@@ -196,7 +197,7 @@ class AnimegenMemory:
                     f'--- NO MEMORIES ABOUT {file_name} /---\n'
                     f'{query_prompt}{message_str}')
             if self.debug:
-                print(f'[MEMORY: QUERY RESPONSE from {file_name}] {response}')
+                print(f'[MEMORY: QUERY RESPONSE from {file_name}] {response}>')
             read_queue.extend(itertools.chain(*map(
                 lambda match: map(str.strip,
                                   match.group(1).lower().split(',')),
@@ -254,12 +255,13 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
     SAVE_MEM_REGEX = re.compile(r"\[\s*save\s*:\s*([^\]]*)\s*\]", re.I)
     CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
     NAME = 'astolfo'
+    LANGUAGE_MODEL = 'Be-Bo/llama-3-chatbot_70b'  # 'as-cle-bert/Llama-3.1-405B-FP8'
 
     def __init__(self, root_path: Path = Path(__file__).parent,
                  *args, **options):
         super().__init__(*args, **options)
         self.img_client = Client("Boboiazumi/animagine-xl-3.1")
-        self.chat_client: Client | None = Client("Be-Bo/llama-3-chatbot_70b")
+        self.chat_client: Client | None = Client(self.LANGUAGE_MODEL)
         cfg_path = root_path.joinpath('config.toml')
         if not cfg_path.exists():
             print("MISSING CONFIG FILE, USING DEFAULT")
@@ -373,7 +375,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             self.chat_client = await asyncio.threads.to_thread(
                 functools.partial(
                     Client,
-                    "Be-Bo/llama-3-chatbot_70b"))
+                    self.LANGUAGE_MODEL))
+            self.counter = 0
 
     async def chat(self, channel: discord.abc.Messageable, message: str):
         assert self.chat_client is not None
@@ -587,21 +590,29 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 msg = f"{ctx.user.mention} has left the conversation!"
                 await self.on_user_leave(ctx.channel, ctx.user.display_name)
 
+            deferred = False
             if not self.chat_participants:  # refresh
                 self.chat_client = None
-                self.counter = 0
                 for task in self._background_tasks:
                     task.cancel()
-                await ctx.response.defer()
+                deferred = True
+                await ctx.response.defer(thinking=True)
                 await self.memory_handler.save()
             if self.chat_participants and self.chat_client is None:
-                await ctx.response.defer()
+                deferred = True
+                await ctx.response.defer(thinking=True)
                 self.chat_client = await asyncio.to_thread(
                     functools.partial(
-                        Client, "Be-Bo/llama-3-chatbot_70b"))
-            await ctx.response.send_message(
-                msg,
-                allowed_mentions=discord.AllowedMentions(users=False))
+                        Client, self.LANGUAGE_MODEL))
+                self.counter = 0
+            if deferred:
+                await ctx.followup.send(
+                    msg,
+                    allowed_mentions=discord.AllowedMentions(users=False))
+            else:
+                await ctx.response.send_message(
+                    msg,
+                    allowed_mentions=discord.AllowedMentions(users=False))
 
         @self.tree.command(
             name="whoschatting",
