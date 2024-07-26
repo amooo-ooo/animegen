@@ -255,7 +255,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
     SAVE_MEM_REGEX = re.compile(r"\[\s*save\s*:\s*([^\]]*)\s*\]", re.I)
     CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
     NAME = 'astolfo'
-    LANGUAGE_MODEL = 'Be-Bo/llama-3-chatbot_70b'  # 'as-cle-bert/Llama-3.1-405B-FP8'
+    LANGUAGE_MODEL = 'vilarin/Llama-3.1-8B-Instruct'
+    MISSING_REGEX = re.compile(r'\[\s*none\s*\]', re.I)
 
     def __init__(self, root_path: Path = Path(__file__).parent,
                  *args, **options):
@@ -391,14 +392,13 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                            f'{history}--- END CHANNEL HISTORY ---\n')
                 if self.debug:
                     print(history)
-            message = self.system_prompt + history + message
-        elif (self.counter % self.general["context_window"]) == 0:
-            message = self.reminder_prompt + message
+            message = history + message
         self.counter += 1
         try:
             result = await asyncio.threads.to_thread(functools.partial(
                 self.chat_client.predict,
                 message=message,
+                system_prompt=self.system_prompt,
                 api_name="/chat"))
         except Exception as e:  # pylint: disable=broad-exception-caught
             self.loop.create_task(self.reload_chat_client(channel))
@@ -440,6 +440,9 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             response = self.blacklist.replace(response, '\\*')
         if self.debug:
             print(response)
+
+        if re.search(self.MISSING_REGEX, response):
+            return # No response
 
         matches = re.split(self.IMAGE_EMBED_REGEX, response, re.I)
         image_gen_failed = False
