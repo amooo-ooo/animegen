@@ -128,7 +128,7 @@ async def msg_as_str(msg: discord.Message):
         reply_msg = await msg_as_str(
             await msg.channel.fetch_message(msg.reference.message_id))
         replies = f'[in response to: `{reply_msg}`]'
-    return (f"{replies}[{msg.created_at}] {msg.author.display_name}: "
+    return (f"{replies}[{msg.created_at}] {msg.author.name}: "
             f"{msg.clean_content}")
 
 
@@ -152,13 +152,13 @@ class AnimegenMemory:
             os.makedirs(self.memories_path)
         self.query_prompt = (
             prompts_path.joinpath("memory_query.txt")
-            .read_text().strip() + '\n')
+            .read_text(encoding='utf8').strip() + '\n')
         self.user_select_prompt = (
             prompts_path.joinpath("memory_select_user.txt")
-            .read_text().strip() + '\n')
+            .read_text(encoding='utf8').strip() + '\n')
         self.write_prompt = (
             prompts_path.joinpath("memory_write.txt")
-            .read_text().strip() + '\n')
+            .read_text(encoding='utf8').strip() + '\n')
 
     async def _message_client(self, message: str) -> str:
         try:
@@ -178,7 +178,7 @@ class AnimegenMemory:
             {"files": ', '.join(map(lambda x: x.stem,
                                     self.memories_path.iterdir()))})
         message_str = await msg_as_str(message)
-        read_queue = [message.author.display_name.lower().strip()]
+        read_queue = [message.author.name.lower().strip()]
         final_response = ''
         while read_queue:
             file_name = read_queue.pop()
@@ -238,7 +238,7 @@ class AnimegenMemory:
             else:
                 file_contents = (
                     f'--- CURRENT MEMORIES ABOUT {file} ---\n'
-                    + path.read_text() + '\n'
+                    + path.read_text(encoding='utf8') + '\n'
                     + f'--- END CURRENT MEMORIES ANOUT {file} ---\n')
             write_prompt = self.write_prompt.format_map(
                 {"user": file})
@@ -255,7 +255,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
     SAVE_MEM_REGEX = re.compile(r"\[\s*save\s*:\s*([^\]]*)\s*\]", re.I)
     CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
     NAME = 'astolfo'
-    LANGUAGE_MODEL = 'vilarin/Llama-3.1-8B-Instruct'
+    LANGUAGE_MODEL = 'Be-Bo/llama-3-chatbot_70b'  # 'vilarin/Llama-3.1-8B-Instruct'
+    HAS_SYS_PROMPT = False
     MISSING_REGEX = re.compile(r'\[\s*none\s*\]', re.I)
 
     def __init__(self, root_path: Path = Path(__file__).parent,
@@ -393,13 +394,18 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 if self.debug:
                     print(history)
             message = history + message
+            if not self.HAS_SYS_PROMPT:
+                message = self.system_prompt + message
+        elif not self.HAS_SYS_PROMPT and self.counter % self.general['context_window'] == 0:
+            message = self.reminder_prompt + message
         self.counter += 1
         try:
             result = await asyncio.threads.to_thread(functools.partial(
                 self.chat_client.predict,
                 message=message,
-                system_prompt=self.system_prompt,
-                api_name="/chat"))
+                api_name="/chat",
+                **({'system_prompt': self.system_prompt}
+                    if self.HAS_SYS_PROMPT else {})))
         except Exception as e:  # pylint: disable=broad-exception-caught
             self.loop.create_task(self.reload_chat_client(channel))
             if self.debug:
@@ -422,7 +428,7 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                     yield discord.File(f, filename=path.name)
             finally:
                 os.remove(path)
-        except gradio_exc.AppError as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             yield e
 
     async def handle_message(self, message: discord.Message):
@@ -444,7 +450,7 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
         if re.search(self.MISSING_REGEX, response):
             return # No response
 
-        matches = re.split(self.IMAGE_EMBED_REGEX, response, re.I)
+        matches: list[str] = re.split(self.IMAGE_EMBED_REGEX, response, re.I)
         image_gen_failed = False
         last_message = None
         for i, msg in enumerate(matches):
@@ -470,12 +476,21 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                             f'{self.NAME}: {response}')
                         image_gen_failed = True
                     else:
-                        # loop iterations, last_message always set
-                        assert last_message is not None
-                        last_message = await last_message.add_files(img)
+                        if last_message is not None:
+                            last_message = await last_message.add_files(img)
+                        else:
+                            last_message = await message.channel.send(file=img)
                         await self.memory_handler.queue_save(
                             f'{self.NAME}: [image: {msg}]')
             else:
+                while len(msg) > 2000:
+                    split_idx = msg.rfind('\n', None, 2000)
+                    if split_idx < 0:
+                        msg.rfind(' ', None, 2000)
+                    if split_idx < 0:
+                        pass  # uh oh
+                    await message.channel.send(msg[:split_idx])
+                    msg = msg[split_idx + 1:]
                 last_message = await message.channel.send(msg)
                 await self.memory_handler.queue_save(
                     f'{self.NAME}: {response}')
@@ -503,7 +518,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             # add to task queue
             self.add_task(self.handle_message(message))
 
-    async def on_user_leave(self, _channel: discord.abc.Messageable, _user: str):
+    async def on_user_leave(self, _channel: discord.abc.Messageable,
+                            _user: discord.User | discord.Member):
         pass
 
     COMMA_SEPERATOR_REGEX = re.compile(r',\s*')
@@ -591,7 +607,7 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             else:
                 self.chat_participants.remove(ctx.user.id)
                 msg = f"{ctx.user.mention} has left the conversation!"
-                await self.on_user_leave(ctx.channel, ctx.user.display_name)
+                await self.on_user_leave(ctx.channel, ctx.user)
 
             deferred = False
             if not self.chat_participants:  # refresh
