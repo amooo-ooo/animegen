@@ -128,7 +128,11 @@ async def msg_as_str(msg: discord.Message):
         reply_msg = await msg_as_str(
             await msg.channel.fetch_message(msg.reference.message_id))
         replies = f'[in response to: `{reply_msg}`]'
-    return (f"{replies}[{msg.created_at}] {msg.author.name}: "
+    chnl = (
+        f'@{msg.channel.recipient}' if isinstance(msg.channel, discord.DMChannel)
+        else f'<#{msg.channel.id}>' if isinstance(msg.channel, discord.PartialMessageable)
+        else f'#{msg.channel.name}')
+    return (f"{replies}[{msg.created_at}:{chnl}] {msg.author.name}: "
             f"{msg.clean_content}")
 
 
@@ -144,7 +148,9 @@ class AnimegenMemory:
             debug: bool = False):
         # should be initialized before use
         self._event_loop: asyncio.AbstractEventLoop = None  # type: ignore
-        self.client = Client(AnimegenMemory.LANGUAGE_MODEL)
+        self.read_client = Client(AnimegenMemory.LANGUAGE_MODEL)
+        self.write_client = Client(AnimegenMemory.LANGUAGE_MODEL)
+        self.background_tasks: set[asyncio.Task] = set()
         self.memories_path = memories_path
         self.debug = debug
         self._queued_to_save: list[tuple[datetime.datetime, str]] = []
@@ -160,17 +166,17 @@ class AnimegenMemory:
             prompts_path.joinpath("memory_write.txt")
             .read_text(encoding='utf8').strip() + '\n')
 
-    async def _message_client(self, message: str) -> str:
+    async def _message_client(self, client: Client, message: str) -> str:
         try:
             return await asyncio.threads.to_thread(functools.partial(
-                self.client.predict,
+                client.predict,
                 message=message,
                 api_name="/chat"
             ))
         except gradio_exc.AppError:
             self.client = await asyncio.threads.to_thread(functools.partial(
                 Client, AnimegenMemory.LANGUAGE_MODEL))
-            return await self._message_client(message)
+            return await self._message_client(client, message)
 
     async def handle_message(self, message: discord.Message) -> str | None:
         visited = set()
@@ -190,10 +196,10 @@ class AnimegenMemory:
                 file_content = f'--- MEMORIES ABOUT {file_name} ---\n'
                 file_content += file.read_text(encoding='utf8') + '\n'
                 file_content += f'--- END MEMORIES ABOUT {file_name} ---\n'
-                response = await self._message_client(
+                response = await self._message_client(self.read_client,
                     f'{file_content}{query_prompt}{message_str}')
             else:
-                response = await self._message_client(
+                response = await self._message_client(self.read_client,
                     f'--- NO MEMORIES ABOUT {file_name} /---\n'
                     f'{query_prompt}{message_str}')
             if self.debug:
@@ -225,7 +231,7 @@ class AnimegenMemory:
         user_prompt = self.user_select_prompt.format_map(
             {"files": ', '.join(map(lambda x: x.stem,
                                     self.memories_path.iterdir()))})
-        response = await self._message_client(
+        response = await self._message_client(self.write_client,
             f'{user_prompt}{messages}')
         if self.debug:
             print(f'[MEMORY: SAVING TO] {response}')
@@ -242,7 +248,7 @@ class AnimegenMemory:
                     + f'--- END CURRENT MEMORIES ANOUT {file} ---\n')
             write_prompt = self.write_prompt.format_map(
                 {"user": file})
-            response = await self._message_client(
+            response = await self._message_client(self.write_client,
                 f'{file_contents}{write_prompt}{messages}')
             with path.open('wt', encoding='utf8') as f:
                 f.write(response)
@@ -253,11 +259,14 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
         r"\[\s*[image]{3,5}\s*:\s*([^\]]*)\s*\]", re.I)
     QUERY_REGEX = re.compile(r'\[\s*query\s*\]', re.I)
     SAVE_MEM_REGEX = re.compile(r"\[\s*save\s*:\s*([^\]]*)\s*\]", re.I)
+    MISSING_REGEX = re.compile(r'\[\s*none\s*\]', re.I)
     CONFIG_READ_CHANNEL_HISTORY = 'read_channel_history'
     NAME = 'astolfo'
-    LANGUAGE_MODEL = 'Be-Bo/llama-3-chatbot_70b'  # 'vilarin/Llama-3.1-8B-Instruct'
+    LANGUAGE_MODEL = (
+        'Be-Bo/llama-3-chatbot_70b'
+        # 'vilarin/Llama-3.1-8B-Instruct'
+    )
     HAS_SYS_PROMPT = False
-    MISSING_REGEX = re.compile(r'\[\s*none\s*\]', re.I)
 
     def __init__(self, root_path: Path = Path(__file__).parent,
                  *args, **options):
@@ -380,7 +389,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                     self.LANGUAGE_MODEL))
             self.counter = 0
 
-    async def chat(self, channel: discord.abc.Messageable, message: str):
+    async def chat(self, channel: discord.abc.Messageable, message: str) \
+            -> str | tuple[Exception, asyncio.Task]:
         assert self.chat_client is not None
         if self.counter == 0:
             history = ''
@@ -407,9 +417,7 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 **({'system_prompt': self.system_prompt}
                     if self.HAS_SYS_PROMPT else {})))
         except Exception as e:  # pylint: disable=broad-exception-caught
-            self.loop.create_task(self.reload_chat_client(channel))
-            if self.debug:
-                return f"```{e}```\nreloading chat client, please wait!"
+            return e, self.loop.create_task(self.reload_chat_client(channel))
 
         return result
 
@@ -443,7 +451,14 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 + await msg_as_str(message))
             # Generate the response
             response = await self.chat(message.channel, message_str)
-            response = self.blacklist.replace(response, '\\*')
+        if not isinstance(response, str):
+            err, task = response
+            await message.channel.send(
+                f'```{err}```reloading chat client, plz wait!')
+            task.add_done_callback(lambda _: asyncio.run_coroutine_threadsafe(
+                self.handle_message(message), self.loop))
+            return
+        response = self.blacklist.replace(response, '\\*')
         if self.debug:
             print(response)
 
@@ -463,13 +478,19 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                         msg, typing_channel=message.channel) as img:
                     if isinstance(img, Exception):
                         async with message.channel.typing():
-                            response = self.blacklist.replace(await self.chat(
+                            response = await self.chat(
                                 message.channel,
                                 f'dev: [image generation failed with error: '
                                 f'"{img}". '
                                 f'please send a followup message including '
                                 f'quota time till reset if available (please '
-                                f'note images will not work in followup)]'),
+                                f'note images will not work in followup)]')
+                            if not isinstance(response, str):
+                                err, task = response
+                                await message.channel.send(
+                                    f'```{err}```reloading chat client, plz wait!')
+                                continue
+                            response = self.blacklist.replace(response,
                                 '\\*')
                         await message.channel.send(response)
                         await self.memory_handler.queue_save(
