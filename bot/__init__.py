@@ -542,7 +542,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
                 with path.open('rb') as f:
                     yield discord.File(f, filename=path.name)
             finally:
-                os.remove(path)
+                # os.remove(path)
+                pass
         except Exception as e:  # pylint: disable=broad-exception-caught
             yield e
 
