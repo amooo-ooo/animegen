@@ -533,11 +533,8 @@ class Animegen(commands.Bot, ABC):  # pylint: disable=design
             self, prompt,
             typing_channel: discord.abc.Messageable | None = None):
         try:
-            if typing_channel is not None:
-                async with typing_channel.typing():
-                    path = Path(await self.generate(prompt))
-            else:
-                path = Path(await self.generate(prompt))
+            path = await self.generate(prompt)
+            path = Path(path)
             try:
                 with path.open('rb') as f:
                     yield discord.File(f, filename=path.name)
