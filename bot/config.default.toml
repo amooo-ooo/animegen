@@ -5,6 +5,7 @@ verbose = false
 read_channel_history = 16
 # prompts_dir = 'prompts'
 # debug = true
+music_dir = "./music"
 
 [defaults]
 prompt = "frieren"

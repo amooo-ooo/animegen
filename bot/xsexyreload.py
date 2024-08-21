@@ -77,7 +77,7 @@ class SexyReloader:
 
     def _handle_watch(self, callback: Callable[[set[str]], None], path: Path):
         print(f"Got update in {path}")
-        if path.name.startswith('x'):
+        if path.suffix != '.py' or path.name.startswith('x'):
             return
         self._loop.call_soon_threadsafe(lambda: callback(self.reload(path)))
 
