@@ -65,8 +65,7 @@ class SexyReloader:
     #     return result
 
     class _EventWatcher(watchdog.events.FileSystemEventHandler):
-        def __init__(self, reloader: 'SexyReloader',
-                     callback: Callable[[Path], Any]) -> None:
+        def __init__(self, callback: Callable[[Path], Any]) -> None:
             super().__init__()
             self.callback = callback
 
@@ -84,7 +83,7 @@ class SexyReloader:
     def watch(self, callback: Callable[[set[str]], None]):
         root = Path(__file__).parent
         listener = SexyReloader._EventWatcher(
-            self, functools.partial(self._handle_watch, callback))
+            functools.partial(self._handle_watch, callback))
         self._observer.schedule(
             listener, root, recursive=True,
             event_filter=(watchdog.events.FileModifiedEvent,))
